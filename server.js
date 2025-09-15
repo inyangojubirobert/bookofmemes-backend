@@ -7,47 +7,57 @@ app.use(express.json());
 app.use(cors());
 
 // --------------------
-// Check if item exists in universal_items view
+// Helper: error handler
 // --------------------
-async function itemExists(itemId) {
-  const { data, error } = await supabase
-    .from("universal_items")
-    .select("id")
-    .eq("id", itemId)
-    .single();
-
-  if (error && error.code !== "PGRST116") {
-    console.error("Error checking item existence:", error);
-    return false;
-  }
-
-  return !!data;
+function handleError(res, err, msg = "Server error") {
+  console.error(msg, err);
+  return res.status(500).json({ error: msg });
 }
 
 // --------------------
-// Fetch stories (for CommentModal)
+// Helper: check if item exists
+// --------------------
+async function itemExists(itemId) {
+  try {
+    const { data, error } = await supabase
+      .from("universal_items")
+      .select("id")
+      .eq("id", itemId)
+      .single();
+
+    if (error && error.code !== "PGRST116") {
+      console.error("Error checking item existence:", error);
+      return false;
+    }
+
+    return !!data;
+  } catch (err) {
+    console.error("Unexpected error in itemExists:", err);
+    return false;
+  }
+}
+
+// --------------------
+// Fetch all stories
 // --------------------
 app.get("/api/stories", async (req, res) => {
-  try { 
+  try {
     const { data, error } = await supabase
       .from("stories")
       .select("id, story_title, author_id");
 
     if (error) throw error;
-
     res.json(data || []);
   } catch (err) {
-    console.error("Error fetching stories:", err);
-    res.status(500).json({ error: "Failed to fetch stories" });
+    return handleError(res, err, "Failed to fetch stories");
   }
 });
 
 // --------------------
-// Fetch comments for any item type
+// Fetch comments
 // --------------------
 app.get("/api/comments", async (req, res) => {
   const { itemId } = req.query;
-
   if (!itemId) return res.status(400).json({ error: "Missing itemId" });
 
   const exists = await itemExists(itemId);
@@ -70,20 +80,17 @@ app.get("/api/comments", async (req, res) => {
       .order("created_at", { ascending: true });
 
     if (error) throw error;
-
     res.json(comments || []);
   } catch (err) {
-    console.error("Server error fetching comments:", err);
-    res.status(500).json({ error: "Failed to fetch comments" });
+    return handleError(res, err, "Failed to fetch comments");
   }
 });
 
 // --------------------
-// Add a new comment (universal)
+// Post new comment
 // --------------------
 app.post("/api/comments", async (req, res) => {
   const { content, user_id, item_id, item_type, parent_id } = req.body;
-
   if (!content || !user_id || !item_id)
     return res.status(400).json({ error: "Missing required fields" });
 
@@ -106,11 +113,9 @@ app.post("/api/comments", async (req, res) => {
       .select();
 
     if (error) throw error;
-
     res.json(data[0]);
   } catch (err) {
-    console.error("Server error posting comment:", err);
-    res.status(500).json({ error: "Failed to post comment" });
+    return handleError(res, err, "Failed to post comment");
   }
 });
 
@@ -128,16 +133,17 @@ app.delete("/api/comments/:id", async (req, res) => {
       .select();
 
     if (error) throw error;
+    if (!data || data.length === 0)
+      return res.status(404).json({ error: "Comment not found" });
 
     res.json({ success: true });
   } catch (err) {
-    console.error("Server error deleting comment:", err);
-    res.status(500).json({ error: "Failed to delete comment" });
+    return handleError(res, err, "Failed to delete comment");
   }
 });
 
 // --------------------
-// Fetch profile by ID (author info)
+// Fetch profile by ID
 // --------------------
 app.get("/api/profiles/:id", async (req, res) => {
   const { id } = req.params;
@@ -150,40 +156,36 @@ app.get("/api/profiles/:id", async (req, res) => {
       .single();
 
     if (error) return res.status(404).json({ error: "Profile not found" });
-
     res.json(data);
   } catch (err) {
-    console.error("Server error fetching profile:", err);
-    res.status(500).json({ error: "Failed to fetch profile" });
+    return handleError(res, err, "Failed to fetch profile");
   }
 });
 
-// --------------------
-const PORT = process.env.PORT || 5001;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
 // --------------------
 // Fetch chapters for a story
 // --------------------
 app.get("/api/stories/:id/chapters", async (req, res) => {
   const { id } = req.params;
+  console.log("Fetching chapters for storyId:", id);
 
   try {
-    // Fetch the story with author profile
+    // Fetch story with author profile
     const { data: story, error: storyError } = await supabase
       .from("stories")
       .select("id, story_title, author_id, profiles(full_name, avatar_url)")
       .eq("id", id)
       .single();
 
-    if (storyError) throw storyError;
+    if (storyError) {
+      console.error("Story fetch error:", storyError);
+      return res.status(500).json({ error: "Story fetch failed" });
+    }
     if (!story) return res.status(404).json({ error: "Story not found" });
 
-    // Normalize field names for frontend
     const normalizedStory = {
       id: story.id,
-      title: story.story_title,   // ✅ map story_title → title
+      title: story.story_title, // frontend-friendly
       author_id: story.author_id,
       profiles: story.profiles || null,
     };
@@ -195,11 +197,21 @@ app.get("/api/stories/:id/chapters", async (req, res) => {
       .eq("story_id", id)
       .order("chapter_number", { ascending: true });
 
-    if (chaptersError) throw chaptersError;
+    if (chaptersError) {
+      console.error("Chapters fetch error:", chaptersError);
+      return res.status(500).json({ error: "Chapters fetch failed" });
+    }
 
-    // Return normalized story + chapters
     res.json({ story: normalizedStory, chapters });
   } catch (err) {
     return handleError(res, err, "Failed to fetch chapters");
   }
+});
+
+// --------------------
+// Start server
+// --------------------
+const PORT = process.env.PORT || 5001;
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
 });
