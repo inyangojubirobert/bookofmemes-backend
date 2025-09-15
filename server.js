@@ -28,7 +28,7 @@ async function itemExists(itemId) {
 // Fetch stories (for CommentModal)
 // --------------------
 app.get("/api/stories", async (req, res) => {
-  try {  console.log("📖 Stories route hit!");  // 👈 Add this line
+  try { 
     const { data, error } = await supabase
       .from("stories")
       .select("id, story_title, author_id");
@@ -162,4 +162,44 @@ app.get("/api/profiles/:id", async (req, res) => {
 const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+});
+// --------------------
+// Fetch chapters for a story
+// --------------------
+app.get("/api/stories/:id/chapters", async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    // Fetch the story with author profile
+    const { data: story, error: storyError } = await supabase
+      .from("stories")
+      .select("id, story_title, author_id, profiles(full_name, avatar_url)")
+      .eq("id", id)
+      .single();
+
+    if (storyError) throw storyError;
+    if (!story) return res.status(404).json({ error: "Story not found" });
+
+    // Normalize field names for frontend
+    const normalizedStory = {
+      id: story.id,
+      title: story.story_title,   // ✅ map story_title → title
+      author_id: story.author_id,
+      profiles: story.profiles || null,
+    };
+
+    // Fetch chapters
+    const { data: chapters, error: chaptersError } = await supabase
+      .from("chapters")
+      .select("id, chapter_number, chapter_title, chapter_content, story_id")
+      .eq("story_id", id)
+      .order("chapter_number", { ascending: true });
+
+    if (chaptersError) throw chaptersError;
+
+    // Return normalized story + chapters
+    res.json({ story: normalizedStory, chapters });
+  } catch (err) {
+    return handleError(res, err, "Failed to fetch chapters");
+  }
 });
