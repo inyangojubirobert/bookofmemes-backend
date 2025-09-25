@@ -7,38 +7,25 @@ app.use(express.json());
 app.use(cors());
 
 // --------------------
-// Helper: error handler
-// --------------------
-function handleError(res, err, msg = "Server error") {
-  console.error(msg, err);
-  return res.status(500).json({ error: msg });
-}
-
-// --------------------
-// Helper: check if item exists
+// Helper: Check if item exists
 // --------------------
 async function itemExists(itemId) {
-  try {
-    const { data, error } = await supabase
-      .from("universal_items")
-      .select("id")
-      .eq("id", itemId)
-      .single();
+  const { data, error } = await supabase
+    .from("universal_items")
+    .select("id")
+    .eq("id", itemId)
+    .single();
 
-    if (error && error.code !== "PGRST116") {
-      console.error("Error checking item existence:", error);
-      return false;
-    }
-
-    return !!data;
-  } catch (err) {
-    console.error("Unexpected error in itemExists:", err);
+  if (error && error.code !== "PGRST116") {
+    console.error("Error checking item existence:", error);
     return false;
   }
+
+  return !!data;
 }
 
 // --------------------
-// Fetch all stories
+// Fetch stories
 // --------------------
 app.get("/api/stories", async (req, res) => {
   try {
@@ -47,23 +34,56 @@ app.get("/api/stories", async (req, res) => {
       .select("id, story_title, author_id");
 
     if (error) throw error;
+
     res.json(data || []);
   } catch (err) {
-    return handleError(res, err, "Failed to fetch stories");
+    console.error("Error fetching stories:", err);
+    res.status(500).json({ error: "Failed to fetch stories" });
   }
 });
 
+
+// Fetch story + chapters
+app.get("/api/stories/:id/chapters", async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    // Fetch story metadata including author_id
+    const { data: story, error: storyError } = await supabase
+      .from("stories")
+      .select("id, story_title, author_id")
+      .eq("id", id)
+      .single();
+
+    if (storyError || !story) throw storyError || new Error("Story not found");
+
+    // Fetch chapters
+    const { data: chapters, error: chaptersError } = await supabase
+      .from("chapters")
+      .select("*")
+      .eq("story_id", id)
+      .order("chapter_number", { ascending: true });
+
+    if (chaptersError) throw chaptersError;
+
+    res.json({ story, chapters });
+  } catch (err) {
+    console.error("Error fetching story + chapters:", err);
+    res.status(500).json({ error: "Failed to fetch story + chapters" });
+  }
+});
+
+
 // --------------------
-// Fetch comments
+// Fetch comments for an item
 // --------------------
 app.get("/api/comments", async (req, res) => {
   const { itemId } = req.query;
+
   if (!itemId) return res.status(400).json({ error: "Missing itemId" });
 
-  const exists = await itemExists(itemId);
-  if (!exists) return res.status(404).json({ error: "Item not found" });
-
   try {
+    // Fetch all comments for this item with profile info
     const { data: comments, error } = await supabase
       .from("comments")
       .select(`
@@ -71,26 +91,56 @@ app.get("/api/comments", async (req, res) => {
         content,
         created_at,
         user_id,
+        author_id,
         parent_id,
         item_id,
         item_type,
-        profiles:user_id (full_name, avatar_url)
+        likes,
+        dislikes,
+        profiles (full_name, avatar_url)
       `)
       .eq("item_id", itemId)
       .order("created_at", { ascending: true });
 
     if (error) throw error;
-    res.json(comments || []);
+
+    // Build threaded tree
+    const buildThreadedTree = (flatComments) => {
+      if (!flatComments || !Array.isArray(flatComments)) return [];
+
+      const map = {};
+      const roots = [];
+
+      flatComments.forEach((c) => {
+        map[c.id] = { ...c, replies: [] };
+      });
+
+      flatComments.forEach((c) => {
+        if (c.parent_id) {
+          map[c.parent_id]?.replies.push(map[c.id]);
+        } else {
+          roots.push(map[c.id]);
+        }
+      });
+
+      return roots;
+    };
+
+    const threadedComments = buildThreadedTree(comments);
+
+    res.json(threadedComments);
   } catch (err) {
-    return handleError(res, err, "Failed to fetch comments");
+    console.error("Server error fetching comments:", err);
+    res.status(500).json({ error: "Failed to fetch comments" });
   }
 });
 
+
 // --------------------
-// Post new comment
-// --------------------
+// POST /api/comments
 app.post("/api/comments", async (req, res) => {
   const { content, user_id, item_id, item_type, parent_id } = req.body;
+
   if (!content || !user_id || !item_id)
     return res.status(400).json({ error: "Missing required fields" });
 
@@ -98,24 +148,34 @@ app.post("/api/comments", async (req, res) => {
   if (!exists) return res.status(404).json({ error: "Item not found" });
 
   try {
+    // Use user_id as author_id (or get it from auth if different)
+    const payload = {
+      content,
+      user_id,
+      author_id: user_id, // ✅ defined
+      item_id,
+      item_type: item_type || "story", // must match your enum
+      parent_id: parent_id || null,
+    };
+
+    console.log("Posting comment payload:", payload);
+
     const { data, error } = await supabase
       .from("comments")
-      .insert([
-        {
-          content,
-          user_id,
-          author_id: user_id,
-          item_id,
-          item_type: item_type || "unknown",
-          parent_id: parent_id || null,
-        },
-      ])
-      .select();
+      .insert(payload)
+      .select(`
+    *,
+    profiles:user_id (full_name, avatar_url)
+  `);
+    if (error) {
+      console.error("Supabase error inserting comment:", error);
+      return res.status(500).json({ error: "Failed to post comment", details: error });
+    }
 
-    if (error) throw error;
     res.json(data[0]);
   } catch (err) {
-    return handleError(res, err, "Failed to post comment");
+    console.error("Unexpected server error:", err);
+    res.status(500).json({ error: "Unexpected server error", details: err.message });
   }
 });
 
@@ -133,12 +193,11 @@ app.delete("/api/comments/:id", async (req, res) => {
       .select();
 
     if (error) throw error;
-    if (!data || data.length === 0)
-      return res.status(404).json({ error: "Comment not found" });
 
     res.json({ success: true });
   } catch (err) {
-    return handleError(res, err, "Failed to delete comment");
+    console.error("Server error deleting comment:", err);
+    res.status(500).json({ error: "Failed to delete comment" });
   }
 });
 
@@ -156,62 +215,16 @@ app.get("/api/profiles/:id", async (req, res) => {
       .single();
 
     if (error) return res.status(404).json({ error: "Profile not found" });
+
     res.json(data);
   } catch (err) {
-    return handleError(res, err, "Failed to fetch profile");
+    console.error("Server error fetching profile:", err);
+    res.status(500).json({ error: "Failed to fetch profile" });
   }
 });
 
-// --------------------
-// Fetch chapters for a story
-// --------------------
-app.get("/api/stories/:id/chapters", async (req, res) => {
-  const { id } = req.params;
-  console.log("Fetching chapters for storyId:", id);
-
-  try {
-    // Fetch story with author profile
-    const { data: story, error: storyError } = await supabase
-      .from("stories")
-      .select("id, story_title, author_id, profiles(full_name, avatar_url)")
-      .eq("id", id)
-      .single();
-
-    if (storyError) {
-      console.error("Story fetch error:", storyError);
-      return res.status(500).json({ error: "Story fetch failed" });
-    }
-    if (!story) return res.status(404).json({ error: "Story not found" });
-
-    const normalizedStory = {
-      id: story.id,
-      title: story.story_title, // frontend-friendly
-      author_id: story.author_id,
-      profiles: story.profiles || null,
-    };
-
-    // Fetch chapters
-    const { data: chapters, error: chaptersError } = await supabase
-      .from("chapters")
-      .select("id, chapter_number, chapter_title, chapter_content, story_id")
-      .eq("story_id", id)
-      .order("chapter_number", { ascending: true });
-
-    if (chaptersError) {
-      console.error("Chapters fetch error:", chaptersError);
-      return res.status(500).json({ error: "Chapters fetch failed" });
-    }
-
-    res.json({ story: normalizedStory, chapters });
-  } catch (err) {
-    return handleError(res, err, "Failed to fetch chapters");
-  }
-});
-
-// --------------------
-// Start server
 // --------------------
 const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
