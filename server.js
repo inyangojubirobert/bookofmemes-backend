@@ -141,38 +141,44 @@ app.get("/api/comments", async (req, res) => {
 app.post("/api/comments", async (req, res) => {
   const { content, user_id, item_id, item_type, parent_id } = req.body;
 
-  if (!content || !user_id || !item_id)
+  // Basic validation
+  if (!content || !user_id || !item_id) {
     return res.status(400).json({ error: "Missing required fields" });
+  }
 
+  // Check if the item exists (optional but good)
   const exists = await itemExists(item_id);
   if (!exists) return res.status(404).json({ error: "Item not found" });
 
   try {
-    // Use user_id as author_id (or get it from auth if different)
     const payload = {
       content,
       user_id,
-      author_id: user_id, // ✅ defined
+      author_id: user_id, // use profiles.user_id as author
       item_id,
-      item_type: item_type || "story", // must match your enum
-      parent_id: parent_id || null,
+      item_type: item_type || "story",
+      parent_id: parent_id || null, // root if null, reply if not
     };
 
     console.log("Posting comment payload:", payload);
 
     const { data, error } = await supabase
       .from("comments")
-      .insert(payload)
+      .insert([payload])
       .select(`
-    *,
-    profiles:user_id (full_name, avatar_url)
-  `);
+        *,
+        profiles:user_id (full_name, avatar_url)
+      `);
+
     if (error) {
-      console.error("Supabase error inserting comment:", error);
-      return res.status(500).json({ error: "Failed to post comment", details: error });
+      console.error("Supabase insert error:", error);
+      return res.status(500).json({
+        error: "Failed to post comment",
+        details: error.message,
+      });
     }
 
-    res.json(data[0]);
+    res.json(data[0]); // send back the new comment with profile info
   } catch (err) {
     console.error("Unexpected server error:", err);
     res.status(500).json({ error: "Unexpected server error", details: err.message });
