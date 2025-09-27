@@ -83,43 +83,52 @@ app.get("/api/comments", async (req, res) => {
   if (!itemId) return res.status(400).json({ error: "Missing itemId" });
 
   try {
-    // Fetch all comments with profile info
+    // Fetch all comments with user profile info
     const { data: comments, error } = await supabase
       .from("comments")
       .select(`
         id,
+        content,
         created_at,
-        author_id,
         user_id,
+        author_id,
         parent_id,
         item_id,
         item_type,
-        content,
         likes,
         dislikes,
-        profiles!comments_user_id_fkey(full_name, avatar_url)
+        profiles (
+          full_name,
+          avatar_url
+        )
       `)
       .eq("item_id", itemId)
       .order("created_at", { ascending: true });
 
     if (error) throw error;
 
+    // Add default avatar if missing
+    const commentsWithDefaults = comments.map(c => ({
+      ...c,
+      profiles: {
+        full_name: c.profiles?.full_name || "Unknown",
+        avatar_url: c.profiles?.avatar_url || "https://via.placeholder.com/36",
+      },
+      replies: [],
+    }));
+
     // Build threaded tree
     const buildThreadedTree = (flatComments) => {
-      if (!flatComments || !Array.isArray(flatComments)) return [];
-
       const map = {};
       const roots = [];
 
-      flatComments.forEach((c) => {
+      flatComments.forEach(c => {
         map[c.id] = { ...c, replies: [] };
       });
 
-      flatComments.forEach((c) => {
+      flatComments.forEach(c => {
         if (c.parent_id) {
-          if (map[c.parent_id]) {
-            map[c.parent_id].replies.push(map[c.id]);
-          }
+          map[c.parent_id]?.replies.push(map[c.id]);
         } else {
           roots.push(map[c.id]);
         }
@@ -128,7 +137,7 @@ app.get("/api/comments", async (req, res) => {
       return roots;
     };
 
-    const threadedComments = buildThreadedTree(comments);
+    const threadedComments = buildThreadedTree(commentsWithDefaults);
 
     res.json(threadedComments);
   } catch (err) {
@@ -191,17 +200,24 @@ app.post("/api/comments", async (req, res) => {
 // --------------------
 app.delete("/api/comments/:id", async (req, res) => {
   const { id } = req.params;
+  const { item_type } = req.body; // make sure frontend sends correct enum
+
+  // Validate enum
+  const allowedTypes = ["story", "post"]; // add other types if you have
+  if (!allowedTypes.includes(item_type)) {
+    return res.status(400).json({ error: `Invalid item_type: ${item_type}` });
+  }
 
   try {
-    const { data, error } = await supabase
+    const { error } = await supabase
       .from("comments")
       .delete()
       .eq("id", id)
-      .select();
+      .eq("item_type", item_type);
 
     if (error) throw error;
 
-    res.json({ success: true });
+    res.json({ message: "Comment deleted successfully" });
   } catch (err) {
     console.error("Server error deleting comment:", err);
     res.status(500).json({ error: "Failed to delete comment" });
