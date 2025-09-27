@@ -199,36 +199,31 @@ app.post("/api/comments", async (req, res) => {
 // Delete comment
 // --------------------
 app.delete("/api/comments/:id", async (req, res) => {
+  const token = req.headers.authorization?.replace("Bearer ", "");
+  if (!token) return res.status(401).json({ error: "Unauthorized" });
+
+  const { data: { user }, error: userError } = await supabase.auth.getUser(token);
+  if (userError || !user) return res.status(401).json({ error: "Unauthorized" });
+
   const { id } = req.params;
-  const { userId } = req.body; // logged-in user
+  const { item_type } = req.body;
 
   try {
-    // Fetch comment first
-    const { data: comment, error: fetchError } = await supabase
-      .from("comments")
-      .select("id, author_id, item_type")
-      .eq("id", id)
-      .single();
-
-    if (fetchError || !comment) return res.status(404).json({ error: "Comment not found" });
-
-    if (comment.author_id !== userId) return res.status(403).json({ error: "Unauthorized" });
-
-    // Delete comment using correct item_type from DB
-    const { error: deleteError } = await supabase
+    const { error } = await supabase
       .from("comments")
       .delete()
-      .eq("id", id);
+      .eq("id", id)
+      .eq("item_type", item_type)
+      .eq("user_id", user.id); // ✅ only allow user to delete own comment
 
-    if (deleteError) throw deleteError;
+    if (error) throw error;
 
-    res.json({ success: true });
+    res.json({ message: "Comment deleted successfully" });
   } catch (err) {
     console.error("Server error deleting comment:", err);
     res.status(500).json({ error: "Failed to delete comment" });
   }
 });
-
 
 // --------------------
 // Fetch profile by ID
