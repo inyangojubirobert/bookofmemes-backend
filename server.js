@@ -83,21 +83,21 @@ app.get("/api/comments", async (req, res) => {
   if (!itemId) return res.status(400).json({ error: "Missing itemId" });
 
   try {
-    // Fetch all comments for this item with profile info
+    // Fetch all comments with profile info
     const { data: comments, error } = await supabase
       .from("comments")
       .select(`
         id,
-        content,
         created_at,
-        user_id,
         author_id,
+        user_id,
         parent_id,
         item_id,
         item_type,
+        content,
         likes,
         dislikes,
-        profiles (full_name, avatar_url)
+        profiles!comments_user_id_fkey(full_name, avatar_url)
       `)
       .eq("item_id", itemId)
       .order("created_at", { ascending: true });
@@ -117,7 +117,9 @@ app.get("/api/comments", async (req, res) => {
 
       flatComments.forEach((c) => {
         if (c.parent_id) {
-          map[c.parent_id]?.replies.push(map[c.id]);
+          if (map[c.parent_id]) {
+            map[c.parent_id].replies.push(map[c.id]);
+          }
         } else {
           roots.push(map[c.id]);
         }
@@ -134,7 +136,6 @@ app.get("/api/comments", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch comments" });
   }
 });
-
 
 // --------------------
 // POST /api/comments
