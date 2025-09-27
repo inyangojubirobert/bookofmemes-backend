@@ -200,29 +200,35 @@ app.post("/api/comments", async (req, res) => {
 // --------------------
 app.delete("/api/comments/:id", async (req, res) => {
   const { id } = req.params;
-  const { item_type } = req.body; // make sure frontend sends correct enum
-
-  // Validate enum
-  const allowedTypes = ["story", "post"]; // add other types if you have
-  if (!allowedTypes.includes(item_type)) {
-    return res.status(400).json({ error: `Invalid item_type: ${item_type}` });
-  }
+  const { userId } = req.body; // logged-in user
 
   try {
-    const { error } = await supabase
+    // Fetch comment first
+    const { data: comment, error: fetchError } = await supabase
+      .from("comments")
+      .select("id, author_id, item_type")
+      .eq("id", id)
+      .single();
+
+    if (fetchError || !comment) return res.status(404).json({ error: "Comment not found" });
+
+    if (comment.author_id !== userId) return res.status(403).json({ error: "Unauthorized" });
+
+    // Delete comment using correct item_type from DB
+    const { error: deleteError } = await supabase
       .from("comments")
       .delete()
-      .eq("id", id)
-      .eq("item_type", item_type);
+      .eq("id", id);
 
-    if (error) throw error;
+    if (deleteError) throw deleteError;
 
-    res.json({ message: "Comment deleted successfully" });
+    res.json({ success: true });
   } catch (err) {
     console.error("Server error deleting comment:", err);
     res.status(500).json({ error: "Failed to delete comment" });
   }
 });
+
 
 // --------------------
 // Fetch profile by ID
