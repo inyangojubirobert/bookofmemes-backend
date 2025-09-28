@@ -208,13 +208,15 @@ app.delete("/api/comments/:id", async (req, res) => {
   const { id } = req.params;
   const { item_type } = req.body;
 
+  console.log("Delete request by:", user.id, "for comment:", id, "with type:", item_type);
+
   try {
     const { error } = await supabase
       .from("comments")
       .delete()
       .eq("id", id)
       .eq("item_type", item_type)
-     .eq("author_id", user.id); // ✅ only allow user to delete own comment
+      .eq("author_id", user.id);
 
     if (error) throw error;
 
@@ -224,6 +226,7 @@ app.delete("/api/comments/:id", async (req, res) => {
     res.status(500).json({ error: "Failed to delete comment" });
   }
 });
+
 
 // --------------------
 // Fetch profile by ID
