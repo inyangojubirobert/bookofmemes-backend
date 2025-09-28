@@ -214,7 +214,7 @@ app.delete("/api/comments/:id", async (req, res) => {
       .delete()
       .eq("id", id)
       .eq("item_type", item_type)
-      .eq("user_id", user.id); // ✅ only allow user to delete own comment
+     .eq("author_id", user.id); // ✅ only allow user to delete own comment
 
     if (error) throw error;
 
