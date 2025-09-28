@@ -161,15 +161,14 @@ app.post("/api/comments", async (req, res) => {
   if (!exists) return res.status(404).json({ error: "Item not found" });
 
   try {
-    const payload = {
-      content,
-      user_id,
-      author_id: user_id, // use profiles.user_id as author
-      item_id,
-      item_type: item_type || "story",
-      parent_id: parent_id || null, // root if null, reply if not
-    };
-
+  const payload = {
+  content,
+  user_id,
+  author_id: user_id,
+  item_id,
+  item_type,       // use exactly what the client sends
+  parent_id: parent_id || null,
+};
     console.log("Posting comment payload:", payload);
 
     const { data, error } = await supabase
