@@ -282,7 +282,7 @@ app.delete("/api/comments/:id/vote", async (req, res) => {
 
     if (error) throw error;
 
-    res.json({ success: true });
+    res.json({data });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
