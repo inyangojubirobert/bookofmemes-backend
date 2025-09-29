@@ -226,6 +226,54 @@ app.delete("/api/comments/:id", async (req, res) => {
   }
 });
 
+// Add or update a vote (like/dislike)
+app.post("/api/comments/:id/vote", async (req, res) => {
+  const { id } = req.params; // comment_id
+  const { user_id, vote_type } = req.body; // "like" or "dislike"
+
+  if (!user_id || !vote_type) {
+    return res.status(400).json({ error: "Missing user_id or vote_type" });
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from("comment_votes")
+      .upsert(
+        { user_id, comment_id: id, vote_type },
+        { onConflict: ["user_id", "comment_id"] }
+      );
+
+    if (error) throw error;
+
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Remove a vote (undo like/dislike)
+app.delete("/api/comments/:id/vote", async (req, res) => {
+  const { id } = req.params; // comment_id
+  const { user_id } = req.body;
+
+  if (!user_id) {
+    return res.status(400).json({ error: "Missing user_id" });
+  }
+
+  try {
+    const { error } = await supabase
+      .from("comment_votes")
+      .delete()
+      .eq("comment_id", id)
+      .eq("user_id", user_id);
+
+    if (error) throw error;
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // --------------------
 // Fetch profile by ID
