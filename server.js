@@ -227,6 +227,7 @@ app.delete("/api/comments/:id", async (req, res) => {
 });
 
 // Add or update a vote (like/dislike)
+// Add or update a vote (like/dislike)
 app.post("/api/comments/:id/vote", async (req, res) => {
   const { id } = req.params; // comment_id
   const { user_id, vote_type } = req.body; // "like" or "dislike"
@@ -236,7 +237,8 @@ app.post("/api/comments/:id/vote", async (req, res) => {
   }
 
   try {
-    const { data, error } = await supabase
+    // Insert or update the user's vote
+    const { error } = await supabase
       .from("comment_votes")
       .upsert(
         { user_id, comment_id: id, vote_type },
@@ -245,8 +247,18 @@ app.post("/api/comments/:id/vote", async (req, res) => {
 
     if (error) throw error;
 
-    res.json({ success: true, data });
+    // Fetch updated counts from comments (trigger keeps them in sync)
+    const { data: counts, error: countErr } = await supabase
+      .from("comments")
+      .select("id, likes, dislikes")
+      .eq("id", id)
+      .single();
+
+    if (countErr) throw countErr;
+
+    res.json(counts);
   } catch (err) {
+    console.error("Vote error:", err);
     res.status(500).json({ error: err.message });
   }
 });
