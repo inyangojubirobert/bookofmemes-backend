@@ -231,7 +231,7 @@ app.delete("/api/comments/:id", async (req, res) => {
 // Add or update a vote (like/dislike)
 app.post("/api/comments/:id/vote", async (req, res) => {
   const { id } = req.params; // comment_id
-  const { user_id, vote_type } = req.body; // "like" or "dislike"
+  const { user_id, vote_type } = req.body;
 
   if (!user_id || !vote_type) {
     return res.status(400).json({ error: "Missing user_id or vote_type" });
@@ -248,7 +248,7 @@ app.post("/api/comments/:id/vote", async (req, res) => {
 
     if (error) throw error;
 
-    // Fetch updated counts from comments (trigger keeps them in sync)
+    // Fetch updated counts
     const { data: counts, error: countErr } = await supabase
       .from("comments")
       .select("id, likes, dislikes")
@@ -257,7 +257,18 @@ app.post("/api/comments/:id/vote", async (req, res) => {
 
     if (countErr) throw countErr;
 
-    res.json(counts);
+    // Fetch the user's vote type
+    const { data: vote } = await supabase
+      .from("comment_votes")
+      .select("vote_type")
+      .eq("comment_id", id)
+      .eq("user_id", user_id)
+      .single();
+
+    res.json({
+      ...counts,
+      current_user_vote: vote?.vote_type || null,
+    });
   } catch (err) {
     console.error("Vote error:", err);
     res.status(500).json({ error: err.message });
@@ -282,7 +293,16 @@ app.delete("/api/comments/:id/vote", async (req, res) => {
 
     if (error) throw error;
 
-    res.json({data });
+    // Recalculate counts after deletion
+    const { data: counts, error: countErr } = await supabase
+      .from("comments")
+      .select("id, likes, dislikes")
+      .eq("id", id)
+      .single();
+
+    if (countErr) throw countErr;
+
+    res.json({ ...counts, current_user_vote: null });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
