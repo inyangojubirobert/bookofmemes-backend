@@ -84,26 +84,27 @@ app.get("/api/comments", async (req, res) => {
 
   try {
     // Fetch all comments with user profile info
-    const { data: comments, error } = await supabase
-      .from("comments")
-      .select(`
-        id,
-        content,
-        created_at,
-        user_id,
-        author_id,
-        parent_id,
-        item_id,
-        item_type,
-        likes,
-        dislikes,
-        profiles (
-          full_name,
-          avatar_url
-        )
-      `)
-      .eq("item_id", itemId)
-      .order("created_at", { ascending: true });
+const { data: comments, error } = await supabase
+  .from("comments")
+  .select(`
+    id,
+    content,
+    created_at,
+    user_id,
+    author_id,
+    parent_id,
+    item_id,
+    item_type,
+    likes,
+    dislikes,
+    profiles:user_id (
+      full_name,
+      avatar_url
+    )
+  `)
+  .eq("item_id", itemId)
+  .order("created_at", { ascending: true });
+
 
     if (error) throw error;
 
