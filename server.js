@@ -107,6 +107,107 @@ const { data: comments, error } = await supabase
 
 
     if (error) throw error;
+    // --------------------
+// Fetch comments for an item (with likes/dislikes users)
+app.get("/api/comments", async (req, res) => {
+  const { itemId } = req.query;
+
+  if (!itemId) return res.status(400).json({ error: "Missing itemId" });
+
+  try {
+    // Fetch all comments with user profile info
+    const { data: comments, error } = await supabase
+      .from("comments")
+      .select(`
+        id,
+        content,
+        created_at,
+        user_id,
+        author_id,
+        parent_id,
+        item_id,
+        item_type,
+        likes,
+        dislikes,
+        profiles:user_id (
+          full_name,
+          avatar_url
+        )
+      `)
+      .eq("item_id", itemId)
+      .order("created_at", { ascending: true });
+
+    if (error) throw error;
+
+    // Add default avatar if missing
+    const commentsWithDefaults = comments.map(c => ({
+      ...c,
+      profiles: {
+        full_name: c.profiles?.full_name || "Unknown",
+        avatar_url: c.profiles?.avatar_url || "https://via.placeholder.com/36",
+      },
+      replies: [],
+      liked_users: [],
+      disliked_users: [],
+    }));
+
+    // Fetch all votes for these comments
+    const commentIds = commentsWithDefaults.map(c => c.id);
+    const { data: votes, error: votesError } = await supabase
+      .from("comment_votes")
+      .select("user_id, comment_id, vote_type, profiles(full_name, avatar_url)")
+      .in("comment_id", commentIds);
+
+    if (votesError) throw votesError;
+
+    // Attach votes to comments
+    commentsWithDefaults.forEach(comment => {
+      votes
+        .filter(v => v.comment_id === comment.id)
+        .forEach(v => {
+          if (v.vote_type === "like") comment.liked_users.push({
+            user_id: v.user_id,
+            full_name: v.profiles?.full_name || "Unknown",
+            avatar_url: v.profiles?.avatar_url || "https://via.placeholder.com/36"
+          });
+          else if (v.vote_type === "dislike") comment.disliked_users.push({
+            user_id: v.user_id,
+            full_name: v.profiles?.full_name || "Unknown",
+            avatar_url: v.profiles?.avatar_url || "https://via.placeholder.com/36"
+          });
+        });
+    });
+
+    // Build threaded tree for replies
+    const buildThreadedTree = (flatComments) => {
+      const map = {};
+      const roots = [];
+
+      flatComments.forEach(c => {
+        map[c.id] = { ...c, replies: [] };
+      });
+
+      flatComments.forEach(c => {
+        if (c.parent_id) {
+          map[c.parent_id]?.replies.push(map[c.id]);
+        } else {
+          roots.push(map[c.id]);
+        }
+      });
+
+      return roots;
+    };
+
+    const threadedComments = buildThreadedTree(commentsWithDefaults);
+
+    res.json(threadedComments);
+
+  } catch (err) {
+    console.error("Server error fetching comments:", err);
+    res.status(500).json({ error: "Failed to fetch comments" });
+  }
+});
+
 
     // Add default avatar if missing
     const commentsWithDefaults = comments.map(c => ({
