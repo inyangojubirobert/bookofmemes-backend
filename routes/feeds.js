@@ -8,6 +8,41 @@ const router = express.Router();
 // --------------------
 // GLOBAL FEED: /feeds
 // --------------------
+// GET /feeds/mentions
+router.get("/mentions", async (req, res) => {
+  try {
+    // Example: get all comments where user_id = someId
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ error: "Missing userId" });
+
+    const { data, error } = await supabase
+      .from("comments")
+      .select(`
+        id,
+        content,
+        item_id,
+        item_type,
+        author_id,
+        parent_id,
+        created_at,
+        profiles!inner(full_name),
+        universal_items!inner(title)
+      `)
+      .or(`content.ilike.%@${userId}%`) // example: mention by @userId
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
+
+    res.json(Array.isArray(data) ? data : []);
+  } catch (err) {
+    console.error("❌ Error fetching mentions:", err);
+    res.status(500).json({ error: "Failed to fetch mentions" });
+  }
+});
+
+
+
+
 router.get("/", async (req, res) => {
   try {
     const { data, error } = await supabase
