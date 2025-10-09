@@ -1,33 +1,34 @@
+// server.js
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import { supabase } from "./config/db.js"; // DB connection
-import feedsRouter from "./routes/feeds.js"; // Feeds route file
-import commentsRouter from "./routes/comments.js"; // Comments route file (optional but recommended)
-
-
-const app = express();
-
+import { supabase } from "./config/db.js";
+import feedsRouter from "./routes/feeds.js";
+import commentsRouter from "./routes/comments.js"; // optional but recommended
 
 dotenv.config();
+
+const app = express();
 const PORT = process.env.PORT || 5001;
 
+// --------------------
 // Middleware
+// --------------------
 app.use(cors());
 app.use(express.json());
 
-// ✅ Mount your routers
+// --------------------
+// Mount Routers
+// --------------------
 app.use("/feeds", feedsRouter);
+app.use("/api/comments", commentsRouter); // Keep your comments router if it exists
 
-app.use("/api/comments", commentsRouter); // add this when you have a comments router
-
-// ✅ Health check endpoint
+// --------------------
+// Health check
+// --------------------
 app.get("/", (req, res) => {
   res.send("✅ BookOfMemes API running successfully");
 });
-
-// ✅ Start server
-
 
 // --------------------
 // Helper: Check if item exists
@@ -43,12 +44,11 @@ async function itemExists(itemId) {
     console.error("Error checking item existence:", error);
     return false;
   }
-
   return !!data;
 }
 
 // --------------------
-// Fetch stories
+// Stories
 // --------------------
 app.get("/api/stories", async (req, res) => {
   try {
@@ -57,7 +57,6 @@ app.get("/api/stories", async (req, res) => {
       .select("id, story_title, author_id");
 
     if (error) throw error;
-
     res.json(data || []);
   } catch (err) {
     console.error("Error fetching stories:", err);
@@ -65,13 +64,10 @@ app.get("/api/stories", async (req, res) => {
   }
 });
 
-
-// Fetch story + chapters
 app.get("/api/stories/:id/chapters", async (req, res) => {
   const { id } = req.params;
 
   try {
-    // Fetch story metadata including author_id
     const { data: story, error: storyError } = await supabase
       .from("stories")
       .select("id, story_title, author_id")
@@ -80,7 +76,6 @@ app.get("/api/stories/:id/chapters", async (req, res) => {
 
     if (storyError || !story) throw storyError || new Error("Story not found");
 
-    // Fetch chapters
     const { data: chapters, error: chaptersError } = await supabase
       .from("chapters")
       .select("*")
@@ -96,73 +91,27 @@ app.get("/api/stories/:id/chapters", async (req, res) => {
   }
 });
 
-
 // --------------------
-// Fetch comments for an item
+// Comments API
 // --------------------
 app.get("/api/comments", async (req, res) => {
   const { itemId } = req.query;
-
   if (!itemId) return res.status(400).json({ error: "Missing itemId" });
 
   try {
-    // Fetch all comments with user profile info
-const { data: comments, error } = await supabase
-  .from("comments")
-  .select(`
-    id,
-    content,
-    created_at,
-    user_id,
-    author_id,
-    parent_id,
-    item_id,
-    item_type,
-    likes,
-    dislikes,
-    profiles:user_id (
-      full_name,
-      avatar_url
-    )
-  `)
-  .eq("item_id", itemId)
-  .order("created_at", { ascending: true });
-
-
-    if (error) throw error;
-    // --------------------
-// Fetch comments for an item (with likes/dislikes users)
-app.get("/api/comments", async (req, res) => {
-  const { itemId } = req.query;
-
-  if (!itemId) return res.status(400).json({ error: "Missing itemId" });
-
-  try {
-    // Fetch all comments with user profile info
+    // Fetch comments
     const { data: comments, error } = await supabase
       .from("comments")
       .select(`
-        id,
-        content,
-        created_at,
-        user_id,
-        author_id,
-        parent_id,
-        item_id,
-        item_type,
-        likes,
-        dislikes,
-        profiles:user_id (
-          full_name,
-          avatar_url
-        )
+        id, content, created_at, user_id, author_id,
+        parent_id, item_id, item_type, likes, dislikes,
+        profiles:user_id(full_name, avatar_url)
       `)
       .eq("item_id", itemId)
       .order("created_at", { ascending: true });
 
     if (error) throw error;
 
-    // Add default avatar if missing
     const commentsWithDefaults = comments.map(c => ({
       ...c,
       profiles: {
@@ -174,7 +123,7 @@ app.get("/api/comments", async (req, res) => {
       disliked_users: [],
     }));
 
-    // Fetch all votes for these comments
+    // Fetch votes
     const commentIds = commentsWithDefaults.map(c => c.id);
     const { data: votes, error: votesError } = await supabase
       .from("comment_votes")
@@ -183,145 +132,59 @@ app.get("/api/comments", async (req, res) => {
 
     if (votesError) throw votesError;
 
-    // Attach votes to comments
+    // Attach votes
     commentsWithDefaults.forEach(comment => {
-      votes
-        .filter(v => v.comment_id === comment.id)
-        .forEach(v => {
-          if (v.vote_type === "like") comment.liked_users.push({
-            user_id: v.user_id,
-            full_name: v.profiles?.full_name || "Unknown",
-            avatar_url: v.profiles?.avatar_url || "https://via.placeholder.com/36"
-          });
-          else if (v.vote_type === "dislike") comment.disliked_users.push({
-            user_id: v.user_id,
-            full_name: v.profiles?.full_name || "Unknown",
-            avatar_url: v.profiles?.avatar_url || "https://via.placeholder.com/36"
-          });
+      votes.filter(v => v.comment_id === comment.id).forEach(v => {
+        if (v.vote_type === "like") comment.liked_users.push({
+          user_id: v.user_id,
+          full_name: v.profiles?.full_name || "Unknown",
+          avatar_url: v.profiles?.avatar_url || "https://via.placeholder.com/36"
         });
+        else if (v.vote_type === "dislike") comment.disliked_users.push({
+          user_id: v.user_id,
+          full_name: v.profiles?.full_name || "Unknown",
+          avatar_url: v.profiles?.avatar_url || "https://via.placeholder.com/36"
+        });
+      });
     });
 
-    // Build threaded tree for replies
-    const buildThreadedTree = (flatComments) => {
-      const map = {};
-      const roots = [];
+    // Threaded comments
+    const map = {}, roots = [];
+    commentsWithDefaults.forEach(c => map[c.id] = { ...c, replies: [] });
+    commentsWithDefaults.forEach(c => {
+      if (c.parent_id) map[c.parent_id]?.replies.push(map[c.id]);
+      else roots.push(map[c.id]);
+    });
 
-      flatComments.forEach(c => {
-        map[c.id] = { ...c, replies: [] };
-      });
-
-      flatComments.forEach(c => {
-        if (c.parent_id) {
-          map[c.parent_id]?.replies.push(map[c.id]);
-        } else {
-          roots.push(map[c.id]);
-        }
-      });
-
-      return roots;
-    };
-
-    const threadedComments = buildThreadedTree(commentsWithDefaults);
-
-    res.json(threadedComments);
-
+    res.json(roots);
   } catch (err) {
     console.error("Server error fetching comments:", err);
     res.status(500).json({ error: "Failed to fetch comments" });
   }
 });
 
-
-    // Add default avatar if missing
-    const commentsWithDefaults = comments.map(c => ({
-      ...c,
-      profiles: {
-        full_name: c.profiles?.full_name || "Unknown",
-        avatar_url: c.profiles?.avatar_url || "https://via.placeholder.com/36",
-      },
-      replies: [],
-    }));
-
-    // Build threaded tree
-    const buildThreadedTree = (flatComments) => {
-      const map = {};
-      const roots = [];
-
-      flatComments.forEach(c => {
-        map[c.id] = { ...c, replies: [] };
-      });
-
-      flatComments.forEach(c => {
-        if (c.parent_id) {
-          map[c.parent_id]?.replies.push(map[c.id]);
-        } else {
-          roots.push(map[c.id]);
-        }
-      });
-
-      return roots;
-    };
-
-    const threadedComments = buildThreadedTree(commentsWithDefaults);
-
-    res.json(threadedComments);
-  } catch (err) {
-    console.error("Server error fetching comments:", err);
-    res.status(500).json({ error: "Failed to fetch comments" });
-  }
-});
-
-// --------------------
-// POST /api/comments
 app.post("/api/comments", async (req, res) => {
   const { content, user_id, item_id, item_type, parent_id } = req.body;
+  if (!content || !user_id || !item_id) return res.status(400).json({ error: "Missing required fields" });
 
-  // Basic validation
-  if (!content || !user_id || !item_id) {
-    return res.status(400).json({ error: "Missing required fields" });
-  }
-
-  // Check if the item exists (optional but good)
   const exists = await itemExists(item_id);
   if (!exists) return res.status(404).json({ error: "Item not found" });
 
   try {
-  const payload = {
-  content,
-  user_id,
-  author_id: user_id,
-  item_id,
-  item_type,       // use exactly what the client sends
-  parent_id: parent_id || null,
-};
-    console.log("Posting comment payload:", payload);
-
+    const payload = { content, user_id, author_id: user_id, item_id, item_type, parent_id: parent_id || null };
     const { data, error } = await supabase
       .from("comments")
       .insert([payload])
-      .select(`
-        *,
-        profiles:user_id (full_name, avatar_url)
-      `);
+      .select(`*, profiles:user_id(full_name, avatar_url)`);
 
-    if (error) {
-      console.error("Supabase insert error:", error);
-      return res.status(500).json({
-        error: "Failed to post comment",
-        details: error.message,
-      });
-    }
-
-    res.json(data[0]); // send back the new comment with profile info
+    if (error) throw error;
+    res.json(data[0]);
   } catch (err) {
-    console.error("Unexpected server error:", err);
-    res.status(500).json({ error: "Unexpected server error", details: err.message });
+    console.error("Server error posting comment:", err);
+    res.status(500).json({ error: "Failed to post comment", details: err.message });
   }
 });
 
-// --------------------
-// Delete comment
-// --------------------
 app.delete("/api/comments/:id", async (req, res) => {
   const token = req.headers.authorization?.replace("Bearer ", "");
   if (!token) return res.status(401).json({ error: "Unauthorized" });
@@ -332,8 +195,6 @@ app.delete("/api/comments/:id", async (req, res) => {
   const { id } = req.params;
   const { item_type } = req.body;
 
-  console.log("Delete request by:", user.id, "for comment:", id, "with type:", item_type);
-
   try {
     const { error } = await supabase
       .from("comments")
@@ -343,7 +204,6 @@ app.delete("/api/comments/:id", async (req, res) => {
       .eq("author_id", user.id);
 
     if (error) throw error;
-
     res.json({ message: "Comment deleted successfully" });
   } catch (err) {
     console.error("Server error deleting comment:", err);
@@ -351,37 +211,25 @@ app.delete("/api/comments/:id", async (req, res) => {
   }
 });
 
-// Add or update a vote (like/dislike)
-// Add or update a vote (like/dislike)
+// Votes
 app.post("/api/comments/:id/vote", async (req, res) => {
-  const { id } = req.params; // comment_id
+  const { id } = req.params;
   const { user_id, vote_type } = req.body;
-
-  if (!user_id || !vote_type) {
-    return res.status(400).json({ error: "Missing user_id or vote_type" });
-  }
+  if (!user_id || !vote_type) return res.status(400).json({ error: "Missing user_id or vote_type" });
 
   try {
-    // Insert or update the user's vote
     const { error } = await supabase
       .from("comment_votes")
-      .upsert(
-        { user_id, comment_id: id, vote_type },
-        { onConflict: ["user_id", "comment_id"] }
-      );
-
+      .upsert({ user_id, comment_id: id, vote_type }, { onConflict: ["user_id", "comment_id"] });
     if (error) throw error;
 
-    // Fetch updated counts
     const { data: counts, error: countErr } = await supabase
       .from("comments")
       .select("id, likes, dislikes")
       .eq("id", id)
       .single();
-
     if (countErr) throw countErr;
 
-    // Fetch the user's vote type
     const { data: vote } = await supabase
       .from("comment_votes")
       .select("vote_type")
@@ -389,24 +237,17 @@ app.post("/api/comments/:id/vote", async (req, res) => {
       .eq("user_id", user_id)
       .single();
 
-    res.json({
-      ...counts,
-      current_user_vote: vote?.vote_type || null,
-    });
+    res.json({ ...counts, current_user_vote: vote?.vote_type || null });
   } catch (err) {
     console.error("Vote error:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// Remove a vote (undo like/dislike)
 app.delete("/api/comments/:id/vote", async (req, res) => {
-  const { id } = req.params; // comment_id
+  const { id } = req.params;
   const { user_id } = req.body;
-
-  if (!user_id) {
-    return res.status(400).json({ error: "Missing user_id" });
-  }
+  if (!user_id) return res.status(400).json({ error: "Missing user_id" });
 
   try {
     const { error } = await supabase
@@ -414,30 +255,25 @@ app.delete("/api/comments/:id/vote", async (req, res) => {
       .delete()
       .eq("comment_id", id)
       .eq("user_id", user_id);
-
     if (error) throw error;
 
-    // Recalculate counts after deletion
     const { data: counts, error: countErr } = await supabase
       .from("comments")
       .select("id, likes, dislikes")
       .eq("id", id)
       .single();
-
     if (countErr) throw countErr;
 
     res.json({ ...counts, current_user_vote: null });
   } catch (err) {
+    console.error("Vote deletion error:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// --------------------
-// Fetch profile by ID
-// --------------------
+// Profiles
 app.get("/api/profiles/:id", async (req, res) => {
   const { id } = req.params;
-
   try {
     const { data, error } = await supabase
       .from("profiles")
@@ -446,7 +282,6 @@ app.get("/api/profiles/:id", async (req, res) => {
       .single();
 
     if (error) return res.status(404).json({ error: "Profile not found" });
-
     res.json(data);
   } catch (err) {
     console.error("Server error fetching profile:", err);
@@ -455,7 +290,8 @@ app.get("/api/profiles/:id", async (req, res) => {
 });
 
 // --------------------
-
+// Start server
+// --------------------
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
