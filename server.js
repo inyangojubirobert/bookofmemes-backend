@@ -1,11 +1,35 @@
 import express from "express";
 import cors from "cors";
-import { supabase } from "./config/db.js";
+import express from "express";
+import dotenv from "dotenv";
+import { supabase } from "./config/db.js"; // DB connection
+import feedsRouter from "./routes/feeds.js"; // Feeds route file
+import commentsRouter from "./routes/comments.js"; // Comments route file (optional but recommended)
+
 
 const app = express();
 app.use(express.json());
 app.use(cors());
+dotenv.config();
 
+const app = express();
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+
+// ✅ Mount your routers
+app.use("/api/feeds", feedsRouter);
+app.use("/api/comments", commentsRouter); // add this when you have a comments router
+
+// ✅ Health check endpoint
+app.get("/", (req, res) => {
+  res.send("✅ BookOfMemes API running successfully");
+});
+
+// ✅ Start server
+const PORT = process.env.PORT || 5001;
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 // --------------------
 // Helper: Check if item exists
 // --------------------
