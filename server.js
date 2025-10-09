@@ -95,10 +95,10 @@ app.get("/api/stories/:id/chapters", async (req, res) => {
 // Comments API
 // --------------------
 app.get("/api/comments", async (req, res) => {
-  const { itemId } = req.query;
+  const { itemId } = req.query; // optional: filter by item
 
   try {
-    // Start query
+    // Build base query
     let query = supabase
       .from("comments")
       .select(`
@@ -108,12 +108,13 @@ app.get("/api/comments", async (req, res) => {
       `)
       .order("created_at", { ascending: true });
 
-    // Only filter by itemId if provided
+    // Apply item filter if itemId is provided
     if (itemId) query = query.eq("item_id", itemId);
 
     const { data: comments, error } = await query;
     if (error) throw error;
 
+    // Add defaults and placeholders
     const commentsWithDefaults = comments.map(c => ({
       ...c,
       profiles: {
@@ -125,7 +126,7 @@ app.get("/api/comments", async (req, res) => {
       disliked_users: [],
     }));
 
-    // Fetch votes
+    // Fetch votes for all comments
     const commentIds = commentsWithDefaults.map(c => c.id);
     const { data: votes, error: votesError } = await supabase
       .from("comment_votes")
@@ -134,23 +135,28 @@ app.get("/api/comments", async (req, res) => {
 
     if (votesError) throw votesError;
 
+    // Attach votes to comments
     commentsWithDefaults.forEach(comment => {
       votes.filter(v => v.comment_id === comment.id).forEach(v => {
-        if (v.vote_type === "like") comment.liked_users.push({
-          user_id: v.user_id,
-          full_name: v.profiles?.full_name || "Unknown",
-          avatar_url: v.profiles?.avatar_url || "https://via.placeholder.com/36"
-        });
-        else if (v.vote_type === "dislike") comment.disliked_users.push({
-          user_id: v.user_id,
-          full_name: v.profiles?.full_name || "Unknown",
-          avatar_url: v.profiles?.avatar_url || "https://via.placeholder.com/36"
-        });
+        if (v.vote_type === "like") {
+          comment.liked_users.push({
+            user_id: v.user_id,
+            full_name: v.profiles?.full_name || "Unknown",
+            avatar_url: v.profiles?.avatar_url || "https://via.placeholder.com/36"
+          });
+        } else if (v.vote_type === "dislike") {
+          comment.disliked_users.push({
+            user_id: v.user_id,
+            full_name: v.profiles?.full_name || "Unknown",
+            avatar_url: v.profiles?.avatar_url || "https://via.placeholder.com/36"
+          });
+        }
       });
     });
 
-    // Threaded comments
-    const map = {}, roots = [];
+    // Build threaded structure
+    const map = {};
+    const roots = [];
     commentsWithDefaults.forEach(c => map[c.id] = { ...c, replies: [] });
     commentsWithDefaults.forEach(c => {
       if (c.parent_id) map[c.parent_id]?.replies.push(map[c.id]);
