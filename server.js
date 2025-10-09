@@ -96,20 +96,22 @@ app.get("/api/stories/:id/chapters", async (req, res) => {
 // --------------------
 app.get("/api/comments", async (req, res) => {
   const { itemId } = req.query;
-  if (!itemId) return res.status(400).json({ error: "Missing itemId" });
 
   try {
-    // Fetch comments
-    const { data: comments, error } = await supabase
+    // Start query
+    let query = supabase
       .from("comments")
       .select(`
         id, content, created_at, user_id, author_id,
         parent_id, item_id, item_type, likes, dislikes,
         profiles:user_id(full_name, avatar_url)
       `)
-      .eq("item_id", itemId)
       .order("created_at", { ascending: true });
 
+    // Only filter by itemId if provided
+    if (itemId) query = query.eq("item_id", itemId);
+
+    const { data: comments, error } = await query;
     if (error) throw error;
 
     const commentsWithDefaults = comments.map(c => ({
@@ -132,7 +134,6 @@ app.get("/api/comments", async (req, res) => {
 
     if (votesError) throw votesError;
 
-    // Attach votes
     commentsWithDefaults.forEach(comment => {
       votes.filter(v => v.comment_id === comment.id).forEach(v => {
         if (v.vote_type === "like") comment.liked_users.push({
@@ -162,6 +163,7 @@ app.get("/api/comments", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch comments" });
   }
 });
+
 
 app.post("/api/comments", async (req, res) => {
   const { content, user_id, item_id, item_type, parent_id } = req.body;
