@@ -20,42 +20,27 @@ router.get("/", async (req, res) => {
         author_id,
         parent_id,
         created_at,
-        profiles:user_id(full_name),
-        universal_items(title, author_id)
+        user_id,
+        profiles!inner(full_name),
+        universal_items!inner(title, author_id)
       `)
       .order("created_at", { ascending: false })
       .limit(20);
 
     if (error) throw error;
 
-    // Collect all author IDs for reference resolution
-    const authorIds = [
-      ...new Set(data.map(c => c.universal_items?.author_id).filter(Boolean)),
-    ];
-
-    let authorProfiles = {};
-    if (authorIds.length > 0) {
-      const { data: authors, error: profileErr } = await supabase
-        .from("profiles")
-        .select("id, full_name")
-        .in("id", authorIds);
-      if (profileErr) throw profileErr;
-
-      authors?.forEach(a => {
-        authorProfiles[a.id] = a.full_name;
-      });
-    }
-
-    const feeds = data.map(c => ({
-      id: c.id,
-      actorName: c.profiles?.full_name || "Anonymous",
-      authorName: authorProfiles[c.universal_items?.author_id] || "Unknown Author",
-      itemTitle: c.universal_items?.title || c.item_type,
-      itemId: c.item_id,
-      type: c.parent_id ? "reply" : "item_comment",
-      comment: c.content,
-      created_at: c.created_at,
-    }));
+    const feeds = Array.isArray(data)
+      ? data.map((c) => ({
+          id: c.id,
+          actorName: c.profiles?.full_name || "Anonymous",
+          authorName: c.universal_items?.author_id || "Unknown Author",
+          itemTitle: c.universal_items?.title || c.item_type,
+          itemId: c.item_id,
+          type: c.parent_id ? "reply" : "item_comment",
+          comment: c.content,
+          created_at: c.created_at,
+        }))
+      : [];
 
     res.json(feeds);
   } catch (err) {
@@ -73,7 +58,7 @@ router.get("/user", async (req, res) => {
   if (!userId) return res.status(400).json({ error: "Missing userId" });
 
   try {
-    // 1️⃣ Comments on items authored by this user
+    // Comments on items authored by this user
     const { data: itemComments, error: commentErr } = await supabase
       .from("comments")
       .select(`
@@ -83,53 +68,59 @@ router.get("/user", async (req, res) => {
         item_type,
         author_id,
         created_at,
-        profiles:user_id(full_name),
-        universal_items(title, author_id)
+        profiles!inner(full_name),
+        universal_items!inner(title, author_id)
       `)
       .eq("universal_items.author_id", userId)
       .order("created_at", { ascending: false });
 
     if (commentErr) throw commentErr;
 
-    // 2️⃣ Replies to comments made by this user
-    const userCommentIds = itemComments.map(c => c.id);
-    const { data: replies, error: replyErr } = await supabase
-      .from("comments")
-      .select(`
-        id,
-        content,
-        parent_id,
-        item_id,
-        item_type,
-        created_at,
-        profiles:user_id(full_name),
-        universal_items(title)
-      `)
-      .in("parent_id", userCommentIds)
-      .order("created_at", { ascending: false });
+    const userCommentIds = itemComments.map((c) => c.id);
+
+    // Replies to user's comments
+    const { data: replies, error: replyErr } = userCommentIds.length
+      ? await supabase
+          .from("comments")
+          .select(`
+            id,
+            content,
+            parent_id,
+            item_id,
+            item_type,
+            created_at,
+            profiles!inner(full_name),
+            universal_items!inner(title)
+          `)
+          .in("parent_id", userCommentIds)
+          .order("created_at", { ascending: false })
+      : { data: [], error: null };
 
     if (replyErr) throw replyErr;
 
-    // 3️⃣ Top comments if user has no interactions
-    const { data: topComments, error: topErr } = await supabase
-      .from("comments")
-      .select(`
-        id,
-        content,
-        item_id,
-        item_type,
-        user_id,
-        profiles:user_id(full_name),
-        universal_items(title)
-      `)
-      .order("likes", { ascending: false })
-      .limit(10);
+    // Top comments if no interactions
+    const { data: topComments, error: topErr } =
+      (itemComments.length + (replies?.length || 0)) === 0
+        ? await supabase
+            .from("comments")
+            .select(`
+              id,
+              content,
+              item_id,
+              item_type,
+              user_id,
+              profiles!inner(full_name),
+              universal_items!inner(title)
+            `)
+            .order("likes", { ascending: false })
+            .limit(10)
+        : { data: [], error: null };
 
     if (topErr) throw topErr;
 
-    // 4️⃣ Merge logic for personalized feed
+    // Merge feeds
     const feeds = [
-      ...itemComments.map(c => ({
+      ...(itemComments || []).map((c) => ({
         id: c.id,
         type: "item_comment",
         actorName: c.profiles?.full_name || "Anonymous",
@@ -137,8 +128,8 @@ router.get("/user", async (req, res) => {
         itemId: c.item_id,
         content: c.content,
       })),
-      ...replies.map(r => {
-        const parent = itemComments.find(c => c.id === r.parent_id);
+      ...(replies || []).map((r) => {
+        const parent = itemComments.find((c) => c.id === r.parent_id);
         return {
           id: r.id,
           type: "reply",
@@ -149,16 +140,14 @@ router.get("/user", async (req, res) => {
           content: r.content,
         };
       }),
-      ...(itemComments.length + replies.length === 0
-        ? topComments.map(c => ({
-            id: c.id,
-            type: "top_comment",
-            actorName: c.profiles?.full_name || "Anonymous",
-            comment: c.content,
-            itemTitle: c.universal_items?.title || c.item_type,
-            itemId: c.item_id,
-          }))
-        : []),
+      ...(topComments || []).map((c) => ({
+        id: c.id,
+        type: "top_comment",
+        actorName: c.profiles?.full_name || "Anonymous",
+        comment: c.content,
+        itemTitle: c.universal_items?.title || c.item_type,
+        itemId: c.item_id,
+      })),
     ];
 
     res.json(feeds);
