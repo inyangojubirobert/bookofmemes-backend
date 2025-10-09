@@ -10,7 +10,7 @@ const app = express();
 
 
 dotenv.config();
-
+const PORT = process.env.PORT || 5001;
 
 // Middleware
 app.use(cors());
@@ -27,7 +27,7 @@ app.get("/", (req, res) => {
 
 // ✅ Start server
 
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+
 // --------------------
 // Helper: Check if item exists
 // --------------------
@@ -454,7 +454,7 @@ app.get("/api/profiles/:id", async (req, res) => {
 });
 
 // --------------------
-const PORT = process.env.PORT || 5001;
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
