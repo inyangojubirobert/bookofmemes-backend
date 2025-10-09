@@ -19,7 +19,7 @@ router.get("/", async (req, res) => {
         profiles:user_id(full_name, avatar_url)
       `)
       .order("created_at", { ascending: false })
-      .limit(20);
+     
 
     if (error) throw error;
     res.json(data);
