@@ -1,174 +1,115 @@
-// routes/feeds.js
-import express from "express";
-import { supabase } from "../config/db.js";
-
-const router = express.Router();
-
-// -----------------------------
-// 🔹 Interactions Public Feed
-// -----------------------------
-router.get("/", async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from("comments")
-      .select(`
-        id,
-        content,
-        user_id,
-        item_id,
-        item_type,
-        created_at,
-        profiles:user_id(full_name, avatar_url)
-      `)
-      .order("created_at", { ascending: false });
-
-    if (error) throw error;
-    res.json(data);
-  } catch (err) {
-    console.error("❌ Public feed error:", err.message);
-    res.status(500).json({ error: "Failed to fetch feeds" });
-  }
-});
-
-// -----------------------------
-// 🔹 Interactions Worthy Mentions
-// Recommended comments/engagements from friends/followers
-// -----------------------------
-router.get("/mentions", async (req, res) => {
-  const { userId } = req.query; // optional: if you want personalized mentions
-  try {
-    let query = supabase
-      .from("comments")
-      .select(`
-        id,
-        content,
-        user_id,
-        item_id,
-        item_type,
-        created_at,
-        profiles:user_id(full_name, avatar_url)
-      `)
-      .order("created_at", { ascending: false });
-
-    // Example: only include comments by friends/followers if userId provided
-    if (userId) {
-      const { data: friends, error: friendsErr } = await supabase
-        .from("follows") // table storing followers/following
-        .select("followed_id")
-        .eq("follower_id", userId);
-
-      if (friendsErr) throw friendsErr;
-
-      const friendIds = friends.map(f => f.followed_id);
-      query = query.in("user_id", friendIds);
-    }
-
-    const { data, error } = await query;
-    if (error) throw error;
-
-    res.json(data);
-  } catch (err) {
-    console.error("❌ Mentions fetch error:", err.message);
-    res.status(500).json({ error: "Failed to fetch mentions" });
-  }
-});
-
-// -----------------------------
-// 🔹 Personalized Feed (Interactions)
-// -----------------------------
-router.get("/user", async (req, res) => {
+router.get("/feeds/personalized", async (req, res) => {
   const { userId } = req.query;
   if (!userId) return res.status(400).json({ error: "Missing userId" });
 
   try {
-    const { data: authorComments, error: authorErr } = await supabase
+    let personalizedFeeds = [];
+
+    // -------------------------
+    // A. Feedback on your items
+    // -------------------------
+    const { data: itemComments } = await supabase
       .from("comments")
-      .select("*, profiles(full_name), item_id, item_type")
+      .select(`
+        id,
+        content,
+        item_id,
+        item_type,
+        item_title,
+        user_id,
+        profiles:user_id(full_name, avatar_url),
+        author:author_id
+      `)
       .eq("author_id", userId)
       .order("created_at", { ascending: false });
 
-    if (authorErr) throw authorErr;
+    itemComments.forEach(comment => {
+      personalizedFeeds.push({
+        type: "item_comment",
+        actorName: comment.profiles.full_name,
+        comment: comment.content,
+        itemType: comment.item_type,
+        itemTitle: comment.item_title,
+        itemId: comment.item_id,
+        redirectUrl: `/item/${comment.item_id}`,
+      });
+    });
 
-    const { data: replies, error: replyErr } = await supabase
+    // -------------------------
+    // B. Replies to user's comments
+    // -------------------------
+    const { data: userComments } = await supabase
       .from("comments")
-      .select("*, profiles(full_name), item_id, item_type")
-      .in("parent_id", authorComments.map((c) => c.id))
-      .order("created_at", { ascending: false });
+      .select("*")
+      .eq("user_id", userId);
 
-    if (replyErr) throw replyErr;
+    const commentIds = userComments.map(c => c.id);
 
-    const feeds = [...authorComments, ...replies];
-    return res.json(feeds);
-  } catch (error) {
-    console.error("❌ Personalized feed error:", error);
-    res.status(500).json({ error: "Internal Server Error" });
-  }
-});
+    if (commentIds.length > 0) {
+      const { data: replies } = await supabase
+        .from("comments")
+        .select(`
+          id,
+          content,
+          parent_id,
+          user_id,
+          profiles:user_id(full_name, avatar_url),
+          item_id,
+          item_type,
+          item_title
+        `)
+        .in("parent_id", commentIds)
+        .order("created_at", { ascending: false });
 
-// -----------------------------
-// 🔹 Bid Sessions Public Feed
-// -----------------------------
-router.get("/bids", async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from("bids") // make sure this table exists
-      .select(`
-        id,
-        title,
-        description,
-        user_id,
-        created_at,
-        profiles:user_id(full_name, avatar_url)
-      `)
-      .order("created_at", { ascending: false });
-
-    if (error) throw error;
-    res.json(data);
-  } catch (err) {
-    console.error("❌ Bid feeds error:", err.message);
-    res.status(500).json({ error: "Failed to fetch bid feeds" });
-  }
-});
-
-// -----------------------------
-// 🔹 Bid Worthy Mentions
-// Recommended bids/comments by friends/followers
-// -----------------------------
-router.get("/bids/mentions", async (req, res) => {
-  const { userId } = req.query; // optional for personalized mentions
-  try {
-    let query = supabase
-      .from("bids")
-      .select(`
-        id,
-        title,
-        description,
-        user_id,
-        created_at,
-        profiles:user_id(full_name, avatar_url)
-      `)
-      .order("created_at", { ascending: false });
-
-    if (userId) {
-      const { data: friends, error: friendsErr } = await supabase
-        .from("follows")
-        .select("followed_id")
-        .eq("follower_id", userId);
-
-      if (friendsErr) throw friendsErr;
-
-      const friendIds = friends.map(f => f.followed_id);
-      query = query.in("user_id", friendIds);
+      replies.forEach(reply => {
+        const parentComment = userComments.find(c => c.id === reply.parent_id);
+        personalizedFeeds.push({
+          type: "reply",
+          actorName: reply.profiles.full_name,
+          originalComment: parentComment?.content,
+          replyContent: reply.content,
+          itemType: reply.item_type,
+          itemTitle: reply.item_title,
+          itemId: reply.item_id,
+          redirectUrl: `/item/${reply.item_id}#comment-${reply.id}`,
+        });
+      });
     }
 
-    const { data, error } = await query;
-    if (error) throw error;
+    // -------------------------
+    // C. General top comments
+    // -------------------------
+    const { data: topComments } = await supabase
+      .from("comments")
+      .select(`
+        id,
+        content,
+        user_id,
+        item_id,
+        item_type,
+        item_title,
+        profiles:user_id(full_name, avatar_url),
+        author:author_id
+      `)
+      .not("user_id", "eq", userId)
+      .order("likes", { ascending: false })
+      .limit(10);
 
-    res.json(data);
+    topComments.forEach(comment => {
+      personalizedFeeds.push({
+        type: "top_comment",
+        actorName: comment.profiles.full_name,
+        comment: comment.content,
+        itemType: comment.item_type,
+        itemTitle: comment.item_title,
+        itemId: comment.item_id,
+        redirectUrl: `/item/${comment.item_id}`,
+      });
+    });
+
+    res.json(personalizedFeeds);
   } catch (err) {
-    console.error("❌ Bid mentions error:", err.message);
-    res.status(500).json({ error: "Failed to fetch bid mentions" });
+    console.error("❌ Personalized feed error:", err.message);
+    res.status(500).json({ error: "Failed to fetch personalized feed" });
   }
 });
-
-export default router;
