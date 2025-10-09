@@ -33,20 +33,6 @@ export const supabase = createClient(
   }
 );
 
-(async () => {
-  try {
-    const { data, error } = await supabase
-      .from('stories')
-      .select('id')
-      .limit(1);
-
-    if (error) throw error;
-    console.log('✅ Supabase connected successfully');
-  } catch (error) {
-    console.warn('⚠️ Supabase connection test warning:', error.message);
-    console.warn('Continuing startup — main app will still run.');
-  }
-})();
 
 
 // Utility function for error handling
