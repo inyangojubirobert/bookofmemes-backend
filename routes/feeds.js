@@ -8,41 +8,8 @@ const router = express.Router();
 // --------------------
 // GLOBAL FEED: /feeds
 // --------------------
-// GET /feeds/mentions
-router.get("/mentions", async (req, res) => {
-  try {
-    // Example: get all comments where user_id = someId
-    const { userId } = req.query;
-    if (!userId) return res.status(400).json({ error: "Missing userId" });
 
-    const { data, error } = await supabase
-      .from("comments")
-      .select(`
-        id,
-        content,
-        item_id,
-        item_type,
-        author_id,
-        parent_id,
-        created_at,
-        profiles!inner(full_name),
-        universal_items!inner(title)
-      `)
-      .or(`content.ilike.%@${userId}%`) // example: mention by @userId
-      .order("created_at", { ascending: false });
-
-    if (error) throw error;
-
-    res.json(Array.isArray(data) ? data : []);
-  } catch (err) {
-    console.error("❌ Error fetching mentions:", err);
-    res.status(500).json({ error: "Failed to fetch mentions" });
-  }
-});
-
-
-
-
+// GET /feeds
 router.get("/", async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -85,6 +52,42 @@ router.get("/", async (req, res) => {
 });
 
 //
+// --------------------
+// MENTIONS: /feeds/mentions
+// --------------------
+router.get("/mentions", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ error: "Missing userId" });
+
+    const { data, error } = await supabase
+      .from("comments")
+      .select(`
+        id,
+        content,
+        item_id,
+        item_type,
+        author_id,
+        parent_id,
+        created_at,
+        profiles!inner(full_name),
+        universal_items!inner(title)
+      `)
+      // Example: filter comments containing @userId
+      .or(`content.ilike.%@${userId}%`)
+      .order("created_at", { ascending: false })
+      .limit(20);
+
+    if (error) throw error;
+
+    res.json(Array.isArray(data) ? data : []);
+  } catch (err) {
+    console.error("❌ Error fetching mentions:", err);
+    res.status(500).json({ error: "Failed to fetch mentions" });
+  }
+});
+
+//
 // ------------------------------
 // PERSONALIZED FEED: /feeds/user
 // ------------------------------
@@ -93,7 +96,7 @@ router.get("/user", async (req, res) => {
   if (!userId) return res.status(400).json({ error: "Missing userId" });
 
   try {
-    // Comments on items authored by this user
+    // 1️⃣ Comments on items authored by this user
     const { data: itemComments, error: commentErr } = await supabase
       .from("comments")
       .select(`
@@ -111,9 +114,11 @@ router.get("/user", async (req, res) => {
 
     if (commentErr) throw commentErr;
 
-    const userCommentIds = itemComments.map((c) => c.id);
+    const userCommentIds = Array.isArray(itemComments)
+      ? itemComments.map((c) => c.id)
+      : [];
 
-    // Replies to user's comments
+    // 2️⃣ Replies to user's comments
     const { data: replies, error: replyErr } = userCommentIds.length
       ? await supabase
           .from("comments")
@@ -133,9 +138,9 @@ router.get("/user", async (req, res) => {
 
     if (replyErr) throw replyErr;
 
-    // Top comments if no interactions
+    // 3️⃣ Top comments if no interactions
     const { data: topComments, error: topErr } =
-      (itemComments.length + (replies?.length || 0)) === 0
+      (itemComments?.length || 0) + (replies?.length || 0) === 0
         ? await supabase
             .from("comments")
             .select(`
