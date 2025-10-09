@@ -17,7 +17,8 @@ app.use(cors());
 app.use(express.json());
 
 // ✅ Mount your routers
-app.use("/api/feeds", feedsRouter);
+app.use("/feeds", feedsRouter);
+
 app.use("/api/comments", commentsRouter); // add this when you have a comments router
 
 // ✅ Health check endpoint
