@@ -2,40 +2,51 @@
 import { createClient } from '@supabase/supabase-js';
 import 'dotenv/config';
 
-// Validate critical environment variables
-const requiredEnvVars = ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY'];
-const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
+// Determine environment
+const isServer = typeof window === 'undefined';
 
-if (missingVars.length > 0) {
+// Environment variable names
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+// Validate critical env variables
+if (!SUPABASE_URL) {
+  throw new Error('Missing SUPABASE_URL in environment variables.');
+}
+
+if (isServer && !SUPABASE_SERVICE_ROLE_KEY) {
   throw new Error(
-    `Missing required Supabase environment variables: ${missingVars.join(', ')}\n` +
-    'Please check your .env file and server configuration.'
+    'Missing SUPABASE_SERVICE_ROLE_KEY for server-side Supabase operations.'
   );
 }
 
-// Initialize Supabase client with enhanced configuration
-export const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY,
-  {
-    auth: {
-      persistSession: false, // Recommended for server-side usage
-      autoRefreshToken: false,
-    },
-    db: {
-      schema: 'public', // Specify your database schema
-    },
-    global: {
-      headers: {
-        'X-Application-Name': 'your-app-name', // For tracking in Supabase logs
-      },
-    },
-  }
-);
+if (!isServer && !SUPABASE_ANON_KEY) {
+  throw new Error(
+    'Missing SUPABASE_ANON_KEY for client-side Supabase operations.'
+  );
+}
 
+// Choose key based on environment
+const key = isServer ? SUPABASE_SERVICE_ROLE_KEY : SUPABASE_ANON_KEY;
 
+// Initialize Supabase client
+export const supabase = createClient(SUPABASE_URL, key, {
+  auth: {
+    persistSession: false,
+    autoRefreshToken: false,
+  },
+  db: {
+    schema: 'public',
+  },
+  global: {
+    headers: {
+      'X-Application-Name': 'bookofmemes-server',
+    },
+  },
+});
 
-// Utility function for error handling
+// Optional helper for consistent error logging
 export const handleSupabaseError = (error) => {
   console.error('Supabase Error:', {
     message: error.message,
