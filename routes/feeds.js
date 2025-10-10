@@ -57,8 +57,8 @@ router.get("/", async (req, res) => {
 // --------------------
 router.get("/mentions", async (req, res) => {
   try {
-    const { userId } = req.query;
-    if (!userId) return res.status(400).json({ error: "Missing userId" });
+    const { username } = req.query; // use username, not userId
+    if (!username) return res.status(400).json({ error: "Missing username" });
 
     const { data, error } = await supabase
       .from("comments")
@@ -73,8 +73,7 @@ router.get("/mentions", async (req, res) => {
         profiles!inner(full_name),
         universal_items!inner(title)
       `)
-      // Example: filter comments containing @userId
-      .or(`content.ilike.%@${userId}%`)
+      .ilike('content', `%@${username}%`) // <- changed from or().ilike()
       .order("created_at", { ascending: false })
       .limit(20);
 
@@ -86,6 +85,7 @@ router.get("/mentions", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch mentions" });
   }
 });
+
 
 //
 // ------------------------------
