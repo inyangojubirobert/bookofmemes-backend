@@ -4,12 +4,9 @@ import { supabase } from "../config/db.js";
 
 const router = express.Router();
 
-//
 // --------------------
 // GLOBAL FEED: /feeds
 // --------------------
-
-// GET /feeds
 router.get("/", async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -23,8 +20,7 @@ router.get("/", async (req, res) => {
         parent_id,
         created_at,
         user_id,
-        profiles!inner(full_name),
-        universal_items!inner(title, author_id)
+        profiles(full_name)
       `)
       .order("created_at", { ascending: false })
       .limit(20);
@@ -35,8 +31,7 @@ router.get("/", async (req, res) => {
       ? data.map((c) => ({
           id: c.id,
           actorName: c.profiles?.full_name || "Anonymous",
-          authorName: c.universal_items?.author_id || "Unknown Author",
-          itemTitle: c.universal_items?.title || c.item_type,
+          itemTitle: c.item_type,
           itemId: c.item_id,
           type: c.parent_id ? "reply" : "item_comment",
           comment: c.content,
@@ -51,36 +46,29 @@ router.get("/", async (req, res) => {
   }
 });
 
-//
 // --------------------
 // MENTIONS: /feeds/mentions
 // --------------------
 router.get("/mentions", async (req, res) => {
-  let { userId, username } = req.query;
-  if (!userId && !username) {
-    return res.status(400).json({ error: "Missing userId or username" });
-  }
-  const target = userId || username;
-
   try {
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ error: "Missing userId" });
+
     const { data, error } = await supabase
       .from("comments")
-     .select(`
-  id,
-  content,
-  item_id,
-  item_type,
-  author_id,
-  parent_id,
-  created_at,
-  user_id,
-  profiles(full_name),
-  universal_items(title, author_id)
-`)
-
-      .or(`content.ilike.%@${target}%`)
+      .select(`
+        id,
+        content,
+        item_id,
+        item_type,
+        author_id,
+        parent_id,
+        created_at,
+        profiles(full_name)
+      `)
+      .or(`content.ilike.%@${userId}%`)
       .order("created_at", { ascending: false })
-  
+      .limit(20);
 
     if (error) throw error;
 
@@ -91,9 +79,6 @@ router.get("/mentions", async (req, res) => {
   }
 });
 
-
-
-//
 // ------------------------------
 // PERSONALIZED FEED: /feeds/user
 // ------------------------------
@@ -112,10 +97,9 @@ router.get("/user", async (req, res) => {
         item_type,
         author_id,
         created_at,
-        profiles!inner(full_name),
-        universal_items!inner(title, author_id)
+        profiles(full_name)
       `)
-      .eq("universal_items.author_id", userId)
+      .eq("author_id", userId)
       .order("created_at", { ascending: false });
 
     if (commentErr) throw commentErr;
@@ -135,8 +119,7 @@ router.get("/user", async (req, res) => {
             item_id,
             item_type,
             created_at,
-            profiles!inner(full_name),
-            universal_items!inner(title)
+            profiles(full_name)
           `)
           .in("parent_id", userCommentIds)
           .order("created_at", { ascending: false })
@@ -155,8 +138,7 @@ router.get("/user", async (req, res) => {
               item_id,
               item_type,
               user_id,
-              profiles!inner(full_name),
-              universal_items!inner(title)
+              profiles(full_name)
             `)
             .order("likes", { ascending: false })
             .limit(10)
@@ -170,7 +152,7 @@ router.get("/user", async (req, res) => {
         id: c.id,
         type: "item_comment",
         actorName: c.profiles?.full_name || "Anonymous",
-        itemTitle: c.universal_items?.title || c.item_type,
+        itemTitle: c.item_type,
         itemId: c.item_id,
         content: c.content,
       })),
@@ -181,7 +163,7 @@ router.get("/user", async (req, res) => {
           type: "reply",
           actorName: r.profiles?.full_name || "Anonymous",
           originalComment: parent?.content || "Your comment",
-          itemTitle: r.universal_items?.title || r.item_type,
+          itemTitle: r.item_type,
           itemId: r.item_id,
           content: r.content,
         };
@@ -191,7 +173,7 @@ router.get("/user", async (req, res) => {
         type: "top_comment",
         actorName: c.profiles?.full_name || "Anonymous",
         comment: c.content,
-        itemTitle: c.universal_items?.title || c.item_type,
+        itemTitle: c.item_type,
         itemId: c.item_id,
       })),
     ];
