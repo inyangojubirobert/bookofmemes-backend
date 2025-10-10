@@ -65,17 +65,19 @@ router.get("/mentions", async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("comments")
-      .select(`
-        id,
-        content,
-        item_id,
-        item_type,
-        author_id,
-        parent_id,
-        created_at,
-        profiles!inner(full_name),
-        universal_items!inner(title)
-      `)
+     .select(`
+  id,
+  content,
+  item_id,
+  item_type,
+  author_id,
+  parent_id,
+  created_at,
+  user_id,
+  profiles(full_name),
+  universal_items(title, author_id)
+`)
+
       .or(`content.ilike.%@${target}%`)
       .order("created_at", { ascending: false })
   
