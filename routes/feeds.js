@@ -8,6 +8,8 @@ const router = express.Router();
 // --------------------
 // GLOBAL FEED: /feeds
 // --------------------
+
+// GET /feeds
 router.get("/", async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -21,8 +23,8 @@ router.get("/", async (req, res) => {
         parent_id,
         created_at,
         user_id,
-        profiles(full_name),
-        universal_items(title, author_id)
+        profiles!inner(full_name),
+        universal_items!inner(title, author_id)
       `)
       .order("created_at", { ascending: false })
       .limit(20);
@@ -55,8 +57,9 @@ router.get("/", async (req, res) => {
 // --------------------
 router.get("/mentions", async (req, res) => {
   let { userId, username } = req.query;
-  if (!userId && !username) return res.status(400).json({ error: "Missing userId or username" });
-
+  if (!userId && !username) {
+    return res.status(400).json({ error: "Missing userId or username" });
+  }
   const target = userId || username;
 
   try {
@@ -70,12 +73,12 @@ router.get("/mentions", async (req, res) => {
         author_id,
         parent_id,
         created_at,
-        profiles(full_name),
-        universal_items(title)
+        profiles!inner(full_name),
+        universal_items!inner(title)
       `)
       .or(`content.ilike.%@${target}%`)
       .order("created_at", { ascending: false })
-      .limit(20);
+  
 
     if (error) throw error;
 
@@ -86,6 +89,8 @@ router.get("/mentions", async (req, res) => {
   }
 });
 
+
+
 //
 // ------------------------------
 // PERSONALIZED FEED: /feeds/user
@@ -95,6 +100,7 @@ router.get("/user", async (req, res) => {
   if (!userId) return res.status(400).json({ error: "Missing userId" });
 
   try {
+    // 1️⃣ Comments on items authored by this user
     const { data: itemComments, error: commentErr } = await supabase
       .from("comments")
       .select(`
@@ -104,16 +110,19 @@ router.get("/user", async (req, res) => {
         item_type,
         author_id,
         created_at,
-        profiles(full_name),
-        universal_items(title, author_id)
+        profiles!inner(full_name),
+        universal_items!inner(title, author_id)
       `)
       .eq("universal_items.author_id", userId)
       .order("created_at", { ascending: false });
 
     if (commentErr) throw commentErr;
 
-    const userCommentIds = Array.isArray(itemComments) ? itemComments.map((c) => c.id) : [];
+    const userCommentIds = Array.isArray(itemComments)
+      ? itemComments.map((c) => c.id)
+      : [];
 
+    // 2️⃣ Replies to user's comments
     const { data: replies, error: replyErr } = userCommentIds.length
       ? await supabase
           .from("comments")
@@ -124,8 +133,8 @@ router.get("/user", async (req, res) => {
             item_id,
             item_type,
             created_at,
-            profiles(full_name),
-            universal_items(title)
+            profiles!inner(full_name),
+            universal_items!inner(title)
           `)
           .in("parent_id", userCommentIds)
           .order("created_at", { ascending: false })
@@ -133,6 +142,7 @@ router.get("/user", async (req, res) => {
 
     if (replyErr) throw replyErr;
 
+    // 3️⃣ Top comments if no interactions
     const { data: topComments, error: topErr } =
       (itemComments?.length || 0) + (replies?.length || 0) === 0
         ? await supabase
@@ -143,8 +153,8 @@ router.get("/user", async (req, res) => {
               item_id,
               item_type,
               user_id,
-              profiles(full_name),
-              universal_items(title)
+              profiles!inner(full_name),
+              universal_items!inner(title)
             `)
             .order("likes", { ascending: false })
             .limit(10)
@@ -152,6 +162,7 @@ router.get("/user", async (req, res) => {
 
     if (topErr) throw topErr;
 
+    // Merge feeds
     const feeds = [
       ...(itemComments || []).map((c) => ({
         id: c.id,
