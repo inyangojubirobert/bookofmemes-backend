@@ -63,6 +63,54 @@ app.get("/api/stories", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch stories" });
   }
 });
+// --------------------
+// Feeds API
+// --------------------
+app.get("/api/feeds", async (req, res) => {
+  const { userId } = req.query;
+
+  try {
+    const { data, error } = await supabase
+      .from("feeds") // replace with your actual feeds table
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
+
+    // Wrap existing logic but always return array
+    res.json(Array.isArray(data) ? data : []);
+  } catch (err) {
+    console.error("Failed to fetch feeds:", err.message);
+    res.json([]); // fail gracefully
+  }
+});
+
+// --------------------
+// Mentions API
+// --------------------
+app.get("/api/mentions", async (req, res) => {
+  const { userId } = req.query;
+
+  // Return empty array if no userId is provided
+  if (!userId) return res.json([]);
+
+  try {
+    const { data, error } = await supabase
+      .from("mentions") // replace with your actual mentions table
+      .select("*")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false }); // optional ordering
+
+    if (error) throw error;
+
+    // Wrap existing logic but always return array
+    res.json(Array.isArray(data) ? data : []);
+  } catch (err) {
+    console.error("Failed to fetch mentions:", err.message);
+    res.json([]); // fail gracefully
+  }
+});
+
 
 app.get("/api/stories/:id/chapters", async (req, res) => {
   const { id } = req.params;
