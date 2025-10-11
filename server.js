@@ -67,56 +67,51 @@ app.get("/api/stories", async (req, res) => {
 // Feeds API
 // --------------------
 // server.js (already partly done)
-app.get("/api/feeds/:id", async (req, res) => {
-  const { id } = req.params;
 
-  try {
-    const { data, error } = await supabase
-      .from("feeds")
-      .select("id, image_url, caption, author_id, created_at, profiles(full_name)")
-      .eq("id", id)
-      .single();
-
-    if (error) throw error;
-    if (!data) return res.status(404).json({ error: "Feed not found" });
-
-    res.json({
-      id: data.id,
-      image_url: data.image_url,
-      caption: data.caption,
-      author_name: data.profiles?.full_name || "Unknown",
-      created_at: data.created_at,
-    });
-  } catch (err) {
-    console.error("Error fetching feed details:", err.message);
-    res.status(500).json({ error: "Failed to fetch feed details" });
-  }
-});
 
 
 // --------------------
 // Mentions API
 // --------------------
-app.get("/api/mentions", async (req, res) => {
-  const { userId } = req.query;
+// server.js (or better: create routes/feeds.js)
+app.get("/api/interactions/:userId", async (req, res) => {
+  const { userId } = req.params;
 
-  // Return empty array if no userId is provided
-  if (!userId) return res.json([]);
+  if (!userId) return res.status(400).json({ error: "Missing userId" });
 
   try {
     const { data, error } = await supabase
-      .from("mentions") // replace with your actual mentions table
-      .select("*")
+      .from("comments")
+      .select(`
+        id,
+        content,
+        item_id,
+        item_type,
+        author_id,
+        parent_id,
+        created_at,
+        user_id,
+        profiles(full_name)
+      `)
       .eq("user_id", userId)
-      .order("created_at", { ascending: false }); // optional ordering
+      .order("created_at", { ascending: false });
 
     if (error) throw error;
 
-    // Wrap existing logic but always return array
-    res.json(Array.isArray(data) ? data : []);
+    const feeds = (data || []).map(item => ({
+      id: item.id,
+      type: item.parent_id ? "reply" : "item_comment",
+      authorName: item.profiles?.full_name || "Anonymous",
+      itemTitle: item.item_type || "Unknown",
+      itemId: item.item_id,
+      comment: item.content,
+      originalComment: item.original_comment || "",
+    }));
+
+    res.json(feeds);
   } catch (err) {
-    console.error("Failed to fetch mentions:", err.message);
-    res.json([]); // fail gracefully
+    console.error("Error fetching interactions feeds:", err);
+    res.status(500).json({ error: "Failed to fetch interactions feeds" });
   }
 });
 
