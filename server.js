@@ -378,15 +378,6 @@ app.get("/api/interactions/:userId", async (req, res) => {
 // --------------------
 // Check Supabase connection
 // --------------------
-(async () => {
-  try {
-    const { data, error } = await supabase.from("profiles").select("id").limit(1);
-    if (error) throw error;
-    console.log("✅ Supabase connected successfully");
-  } catch (err) {
-    console.error("❌ Supabase connection failed:", err.message);
-  }
-})();
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
