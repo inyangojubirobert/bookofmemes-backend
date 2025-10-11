@@ -308,65 +308,6 @@ app.get("/api/profiles/:id", async (req, res) => {
   }
 });
 // --------------------
-// FEEDS API
-app.get("/api/interactions/:userId", async (req, res) => {
-  const { userId } = req.params;
-  const { type } = req.query; // "feeds" or "mentions"
-
-  if (!userId) {
-    return res.status(400).json({ error: "Missing userId" });
-  }
-
-  try {
-    let query = supabase
-      .from("comments")
-      .select(`
-        id,
-        content,
-        item_id,
-        item_type,
-        author_id,
-        parent_id,
-        created_at,
-        user_id,
-        likes,
-        dislikes,
-        profiles(full_name)
-      `);
-
-    if (type === "mentions") {
-      query = query
-        .neq("author_id", userId) // exclude self
-        .eq("user_id", userId)
-        .order("created_at", { ascending: false })
-        .limit(10);
-    } else {
-      query = query
-        .eq("user_id", userId)
-        .order("created_at", { ascending: false });
-    }
-
-    const { data, error } = await query;
-    if (error) throw error;
-
-    const result = (data || []).map(item => ({
-      id: item.id,
-      type: item.parent_id ? "reply" : "comment",
-      authorName: item.profiles?.full_name || "Anonymous",
-      itemType: item.item_type,
-      itemId: item.item_id,
-      comment: item.content,
-      likes: item.likes || 0,
-      dislikes: item.dislikes || 0,
-      createdAt: item.created_at,
-    }));
-
-    res.json(result);
-  } catch (err) {
-    console.error("Error fetching interactions:", err.message);
-    res.status(500).json({ error: "Failed to fetch interactions" });
-  }
-});
 
 
 
