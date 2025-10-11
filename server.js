@@ -351,7 +351,8 @@ app.get("/api/profiles/:id", async (req, res) => {
 // --------------------
 // FEEDS API
 // --------------------
-//app.get("/api/feeds/interactions/:userId", async (req, res) => {
+// FEEDS API
+app.get("/api/feeds/interactions/:userId", async (req, res) => {
   const { userId } = req.params;
   const { type } = req.query; // "feeds" or "mentions"
 
@@ -376,7 +377,6 @@ app.get("/api/profiles/:id", async (req, res) => {
         profiles(full_name)
       `);
 
-    // Filter for mentions or personal feeds
     if (type === "mentions") {
       query = query
         .neq("author_id", userId) // not self
@@ -392,7 +392,7 @@ app.get("/api/profiles/:id", async (req, res) => {
     const { data, error } = await query;
     if (error) throw error;
 
-    const result = (data || []).map((item) => ({
+    const result = (data || []).map(item => ({
       id: item.id,
       type: item.parent_id ? "reply" : "comment",
       authorName: item.profiles?.full_name || "Anonymous",
@@ -409,6 +409,7 @@ app.get("/api/profiles/:id", async (req, res) => {
     console.error("Error fetching interactions:", err.message);
     res.status(500).json({ error: "Failed to fetch interactions" });
   }
+});
 
 
 
