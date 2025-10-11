@@ -4,6 +4,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import { supabase } from "./config/db.js";
 import feedsRouter from "./routes/feeds.js";
+import commentsRouter from "./routes/comments.js";
 
 
 dotenv.config();
@@ -23,6 +24,7 @@ app.use(express.json());
 
 app.use("/api/feeds", feedsRouter);
 app.use("/api/comments", commentsRouter); // Keep your comments router if it exists
+
 
 // --------------------
 // Health check
