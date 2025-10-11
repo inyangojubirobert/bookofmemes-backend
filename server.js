@@ -66,24 +66,33 @@ app.get("/api/stories", async (req, res) => {
 // --------------------
 // Feeds API
 // --------------------
-app.get("/api/feeds", async (req, res) => {
-  const { userId } = req.query;
+// server.js (already partly done)
+app.get("/api/feeds/:id", async (req, res) => {
+  const { id } = req.params;
 
   try {
     const { data, error } = await supabase
-      .from("feeds") // replace with your actual feeds table
-      .select("*")
-      .order("created_at", { ascending: false });
+      .from("feeds")
+      .select("id, image_url, caption, author_id, created_at, profiles(full_name)")
+      .eq("id", id)
+      .single();
 
     if (error) throw error;
+    if (!data) return res.status(404).json({ error: "Feed not found" });
 
-    // Wrap existing logic but always return array
-    res.json(Array.isArray(data) ? data : []);
+    res.json({
+      id: data.id,
+      image_url: data.image_url,
+      caption: data.caption,
+      author_name: data.profiles?.full_name || "Unknown",
+      created_at: data.created_at,
+    });
   } catch (err) {
-    console.error("Failed to fetch feeds:", err.message);
-    res.json([]); // fail gracefully
+    console.error("Error fetching feed details:", err.message);
+    res.status(500).json({ error: "Failed to fetch feed details" });
   }
 });
+
 
 // --------------------
 // Mentions API
