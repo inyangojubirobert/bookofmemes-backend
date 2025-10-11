@@ -379,6 +379,7 @@ app.get("/api/interactions/:userId", async (req, res) => {
 // Check Supabase connection
 // --------------------
 
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
