@@ -4,7 +4,9 @@ import cors from "cors";
 import dotenv from "dotenv";
 import { supabase } from "./config/db.js";
 import feedsRouter from "./routes/feeds.js";
-import commentsRouter from "./routes/comments.js"; // optional but recommended
+app.use("/api/feeds", feedsRouter);
+
+
 
 dotenv.config();
 
