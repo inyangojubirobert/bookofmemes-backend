@@ -74,47 +74,6 @@ app.get("/api/stories", async (req, res) => {
 // Mentions API
 // --------------------
 // server.js (or better: create routes/feeds.js)
-app.get("/api/interactions/:userId", async (req, res) => {
-  const { userId } = req.params;
-
-  if (!userId) return res.status(400).json({ error: "Missing userId" });
-
-  try {
-    const { data, error } = await supabase
-      .from("comments")
-      .select(`
-        id,
-        content,
-        item_id,
-        item_type,
-        author_id,
-        parent_id,
-        created_at,
-        user_id,
-        profiles(full_name)
-      `)
-      .eq("user_id", userId)
-      .order("created_at", { ascending: false });
-
-    if (error) throw error;
-
-    const feeds = (data || []).map(item => ({
-      id: item.id,
-      type: item.parent_id ? "reply" : "item_comment",
-      authorName: item.profiles?.full_name || "Anonymous",
-      itemTitle: item.item_type || "Unknown",
-      itemId: item.item_id,
-      comment: item.content,
-      originalComment: item.original_comment || "",
-    }));
-
-    res.json(feeds);
-  } catch (err) {
-    console.error("Error fetching interactions feeds:", err);
-    res.status(500).json({ error: "Failed to fetch interactions feeds" });
-  }
-});
-
 
 app.get("/api/stories/:id/chapters", async (req, res) => {
   const { id } = req.params;
@@ -350,9 +309,7 @@ app.get("/api/profiles/:id", async (req, res) => {
 });
 // --------------------
 // FEEDS API
-// --------------------
-// FEEDS API
-app.get("/api/feeds/interactions/:userId", async (req, res) => {
+app.get("/api/interactions/:userId", async (req, res) => {
   const { userId } = req.params;
   const { type } = req.query; // "feeds" or "mentions"
 
@@ -379,7 +336,7 @@ app.get("/api/feeds/interactions/:userId", async (req, res) => {
 
     if (type === "mentions") {
       query = query
-        .neq("author_id", userId) // not self
+        .neq("author_id", userId) // exclude self
         .eq("user_id", userId)
         .order("created_at", { ascending: false })
         .limit(10);
@@ -410,6 +367,8 @@ app.get("/api/feeds/interactions/:userId", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch interactions" });
   }
 });
+
+
 
 
 
