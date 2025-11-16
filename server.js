@@ -357,7 +357,7 @@ app.get("/api/users/:userId/content", async (req, res) => {
   const { userId } = req.params;
 
   try {
-    // 1. Fetch all item types from universal_items
+    // Fetch all item types
     const { data: itemTypes, error: utError } = await supabase
       .from("universal_items")
       .select("item_type");
@@ -366,37 +366,38 @@ app.get("/api/users/:userId/content", async (req, res) => {
 
     const allContent = [];
 
-    // 2. Loop through each item type dynamically
+    // Loop through tables
     for (const item of itemTypes) {
-      const tableName = item.item_type;
+      const table = item.item_type;
 
       try {
-        // Check if the table has a content_covers relationship
-        let query = supabase.from(tableName).select("*").eq("author_id", userId);
+        // Attempt: select with cover join
+        const { data, error } = await supabase
+          .from(table)
+          .select(`
+            *,
+            content_covers(
+              image_url
+            )
+          `)
+          .eq("author_id", userId);
 
-        // Dynamically join content_covers if exists
-        const { data: columns } = await supabase
-          .from("information_schema.columns")
-          .select("column_name")
-          .eq("table_name", tableName);
+        // If join fails (table has no relationship), fallback to normal select
+        if (error && error.code === "PGRST200") {
+          const { data: fallback } = await supabase
+            .from(table)
+            .select("*")
+            .eq("author_id", userId);
 
-        if (columns?.some(col => col.column_name === "content_covers")) {
-          query = supabase.from(tableName).select("*, content_covers!inner(image_url)").eq("author_id", userId);
+          fallback?.forEach(r => r.item_type = table);
+          allContent.push(...fallback);
+        } else {
+          data?.forEach(r => r.item_type = table);
+          allContent.push(...data);
         }
 
-        const { data: contentData, error: contentError } = await query;
-
-        if (contentError) {
-          console.warn(`Error fetching content for ${tableName}:`, contentError.message);
-          continue;
-        }
-
-        // 3. Attach the item_type so frontend knows
-        contentData?.forEach(c => c.item_type = tableName);
-
-        allContent.push(...(contentData || []));
-      } catch (innerErr) {
-        console.warn(`Skipping table ${tableName} due to error:`, innerErr.message);
+      } catch (err) {
+        console.warn(`Skipping table ${table}:`, err.message);
       }
     }
 
@@ -406,6 +407,7 @@ app.get("/api/users/:userId/content", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch user content" });
   }
 });
+
 
 
 // --------------------
