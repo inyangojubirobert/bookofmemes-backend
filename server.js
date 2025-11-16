@@ -357,26 +357,56 @@ app.get("/api/users/:userId/content", async (req, res) => {
   const { userId } = req.params;
 
   try {
-    // Fetch all items belonging to this user (author/owner/user)
-    const { data, error } = await supabase
+    // 1. Fetch all item types from universal_items
+    const { data: itemTypes, error: utError } = await supabase
       .from("universal_items")
-      .select(`
-        id,
-        item_type,
-        created_at,
-        content_covers!inner(image_url)  -- join with content_covers
-      `)
-      .or(`author_id.eq.${userId},owner_id.eq.${userId},user_id.eq.${userId}`)
-      .order("created_at", { ascending: false });
+      .select("item_type");
 
-    if (error) throw error;
+    if (utError) throw utError;
 
-    res.json(data || []);
+    const allContent = [];
+
+    // 2. Loop through each item type dynamically
+    for (const item of itemTypes) {
+      const tableName = item.item_type;
+
+      try {
+        // Check if the table has a content_covers relationship
+        let query = supabase.from(tableName).select("*").eq("author_id", userId);
+
+        // Dynamically join content_covers if exists
+        const { data: columns } = await supabase
+          .from("information_schema.columns")
+          .select("column_name")
+          .eq("table_name", tableName);
+
+        if (columns?.some(col => col.column_name === "content_covers")) {
+          query = supabase.from(tableName).select("*, content_covers!inner(image_url)").eq("author_id", userId);
+        }
+
+        const { data: contentData, error: contentError } = await query;
+
+        if (contentError) {
+          console.warn(`Error fetching content for ${tableName}:`, contentError.message);
+          continue;
+        }
+
+        // 3. Attach the item_type so frontend knows
+        contentData?.forEach(c => c.item_type = tableName);
+
+        allContent.push(...(contentData || []));
+      } catch (innerErr) {
+        console.warn(`Skipping table ${tableName} due to error:`, innerErr.message);
+      }
+    }
+
+    res.json(allContent);
   } catch (err) {
     console.error("Error fetching user content:", err);
     res.status(500).json({ error: "Failed to fetch user content" });
   }
 });
+
 
 // --------------------
 
