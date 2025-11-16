@@ -47,6 +47,23 @@ async function itemExists(itemId) {
   return !!data;
 }
 
+// Resolve the owner/author of an item so comments can be addressed correctly
+async function getItemOwnerId(itemId) {
+  const { data, error } = await supabase
+    .from("universal_items")
+    .select("author_id, owner_id, user_id")
+    .eq("id", itemId)
+    .single();
+
+  if (error && error.code !== "PGRST116") {
+    console.error("Error fetching item owner:", error);
+    return null;
+  }
+
+  // Prefer explicit author_id, then owner_id, then user_id as a fallback
+  return data?.author_id || data?.owner_id || data?.user_id || null;
+}
+
 // --------------------
 // Stories
 // --------------------
@@ -106,7 +123,7 @@ app.get("/api/stories/:id/chapters", async (req, res) => {
 // Comments API
 // --------------------
 app.get("/api/comments", async (req, res) => {
-  const { itemId } = req.query; // optional: filter by item
+  const { itemId, authorId, excludeSelf, limit, minLikes } = req.query; // optional filters
 
   try {
     // Build base query
@@ -117,10 +134,32 @@ app.get("/api/comments", async (req, res) => {
         parent_id, item_id, item_type, likes, dislikes,
         profiles:user_id(full_name, avatar_url)
       `)
-      .order("created_at", { ascending: true });
+      .order("created_at", { ascending: false });
 
     // Apply item filter if itemId is provided
     if (itemId) query = query.eq("item_id", itemId);
+
+    // Apply author filter to return comments addressed to an author's items
+    if (authorId) query = query.eq("author_id", authorId);
+
+    // Optionally exclude self-comments (author commenting on own item)
+    if (authorId && (excludeSelf === "true" || excludeSelf === "1")) {
+      query = query.neq("user_id", authorId);
+    }
+
+    // Optional minLikes
+    if (typeof minLikes !== 'undefined') {
+      const ml = Number(minLikes);
+      if (!Number.isNaN(ml)) {
+        query = query.gte("likes", ml);
+      }
+    }
+
+    // Optional limit
+    if (limit) {
+      const n = Number(limit);
+      if (!Number.isNaN(n) && n > 0) query = query.limit(n);
+    }
 
     const { data: comments, error } = await query;
     if (error) throw error;
@@ -190,7 +229,11 @@ app.post("/api/comments", async (req, res) => {
   if (!exists) return res.status(404).json({ error: "Item not found" });
 
   try {
-    const payload = { content, user_id, author_id: user_id, item_id, item_type, parent_id: parent_id || null };
+    // Identify the item's owner to properly address the comment to the author
+    const ownerId = await getItemOwnerId(item_id);
+    if (!ownerId) return res.status(400).json({ error: "Could not resolve item owner" });
+
+    const payload = { content, user_id, author_id: ownerId, item_id, item_type, parent_id: parent_id || null };
     const { data, error } = await supabase
       .from("comments")
       .insert([payload])
@@ -307,6 +350,34 @@ app.get("/api/profiles/:id", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch profile" });
   }
 });
+// --------------------
+// Get all content for a user
+// --------------------
+app.get("/api/users/:userId/content", async (req, res) => {
+  const { userId } = req.params;
+
+  try {
+    // Fetch all items belonging to this user (author/owner/user)
+    const { data, error } = await supabase
+      .from("universal_items")
+      .select(`
+        id,
+        item_type,
+        created_at,
+        content_covers!inner(image_url)  -- join with content_covers
+      `)
+      .or(`author_id.eq.${userId},owner_id.eq.${userId},user_id.eq.${userId}`)
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
+
+    res.json(data || []);
+  } catch (err) {
+    console.error("Error fetching user content:", err);
+    res.status(500).json({ error: "Failed to fetch user content" });
+  }
+});
+
 // --------------------
 
 
