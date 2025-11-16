@@ -353,11 +353,14 @@ app.get("/api/profiles/:id", async (req, res) => {
 // --------------------
 // Get all content for a user
 // --------------------
+// --------------------
+// Get all content for a user (optimized with main covers)
+// --------------------
 app.get("/api/users/:userId/content", async (req, res) => {
   const { userId } = req.params;
 
   try {
-    // Fetch all item types
+    // 1. Fetch all item types
     const { data: itemTypes, error: utError } = await supabase
       .from("universal_items")
       .select("item_type");
@@ -366,38 +369,54 @@ app.get("/api/users/:userId/content", async (req, res) => {
 
     const allContent = [];
 
-    // Loop through tables
+    // 2. Loop through each item type dynamically
     for (const item of itemTypes) {
       const table = item.item_type;
 
       try {
-        // Attempt: select with cover join
-        const { data, error } = await supabase
+        // Fetch all items of this type for the user
+        const { data: items, error: itemsError } = await supabase
           .from(table)
-          .select(`
-            *,
-            content_covers(
-              image_url
-            )
-          `)
+          .select("*")
           .eq("author_id", userId);
 
-        // If join fails (table has no relationship), fallback to normal select
-        if (error && error.code === "PGRST200") {
-          const { data: fallback } = await supabase
-            .from(table)
-            .select("*")
-            .eq("author_id", userId);
-
-          fallback?.forEach(r => r.item_type = table);
-          allContent.push(...fallback);
-        } else {
-          data?.forEach(r => r.item_type = table);
-          allContent.push(...data);
+        if (itemsError) {
+          console.warn(`Skipping ${table} due to fetch error:`, itemsError.message);
+          continue;
         }
 
-      } catch (err) {
-        console.warn(`Skipping table ${table}:`, err.message);
+        if (!items || items.length === 0) continue;
+
+        // Collect all item IDs for this table
+        const itemIds = items.map(i => i.id);
+
+        // Fetch all main covers for these items in ONE query
+        const { data: covers, error: coversError } = await supabase
+          .from("content_covers")
+          .select("item_id, image_url")
+          .in("item_id", itemIds)
+          .eq("item_type", table)
+          .eq("is_main_cover", true);
+
+        if (coversError) {
+          console.warn(`Failed to fetch covers for ${table}:`, coversError.message);
+        }
+
+        // Map covers by item_id for quick lookup
+        const coverMap = {};
+        covers?.forEach(c => {
+          coverMap[c.item_id] = c;
+        });
+
+        // Attach main cover to each item
+        items.forEach(itemRow => {
+          itemRow.content_covers = coverMap[itemRow.id] || null;
+          itemRow.item_type = table; // attach the type for frontend
+        });
+
+        allContent.push(...items);
+      } catch (innerErr) {
+        console.warn(`Skipping table ${table}:`, innerErr.message);
       }
     }
 
