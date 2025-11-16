@@ -71,7 +71,7 @@ app.get("/api/stories", async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("stories")
-      .select("id, story_title, author_id");
+      .select("id, title, author_id");
 
     if (error) throw error;
     res.json(data || []);
@@ -98,7 +98,7 @@ app.get("/api/stories/:id/chapters", async (req, res) => {
   try {
     const { data: story, error: storyError } = await supabase
       .from("stories")
-      .select("id, story_title, author_id")
+      .select("id, title, author_id")
       .eq("id", id)
       .single();
 
