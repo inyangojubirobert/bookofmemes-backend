@@ -356,67 +356,64 @@ app.get("/api/profiles/:id", async (req, res) => {
 // --------------------
 // Get all content for a user (optimized with main covers)
 // --------------------
+// Get all content for a user (dynamic & scalable)
 app.get("/api/users/:userId/content", async (req, res) => {
   const { userId } = req.params;
 
   try {
-    // 1. Fetch all item types
+    // 1. Fetch all distinct item types for the user
     const { data: itemTypes, error: utError } = await supabase
       .from("universal_items")
-      .select("item_type");
+      .select("item_type")
+      .neq("author_id", null); // optional: only types with authors
 
     if (utError) throw utError;
+    if (!itemTypes || itemTypes.length === 0) return res.json([]);
 
     const allContent = [];
 
-    // 2. Loop through each item type dynamically
+    // 2. Loop through each item type
     for (const item of itemTypes) {
-      const table = item.item_type;
+      const tableName = item.item_type;
 
       try {
-        // Fetch all items of this type for the user
+        // 3. Fetch all items of this type for the user
         const { data: items, error: itemsError } = await supabase
-          .from(table)
+          .from(tableName)
           .select("*")
           .eq("author_id", userId);
 
-        if (itemsError) {
-          console.warn(`Skipping ${table} due to fetch error:`, itemsError.message);
-          continue;
-        }
+        if (itemsError || !items || items.length === 0) continue;
 
-        if (!items || items.length === 0) continue;
-
-        // Collect all item IDs for this table
+        // 4. Collect all item IDs
         const itemIds = items.map(i => i.id);
 
-        // Fetch all main covers for these items in ONE query
+        // 5. Fetch all main covers for these items in one query
         const { data: covers, error: coversError } = await supabase
           .from("content_covers")
-          .select("item_id, image_url")
+          .select("item_id, image_url, title")
           .in("item_id", itemIds)
-          .eq("item_type", table)
+          .eq("item_type", tableName)
           .eq("is_main_cover", true);
 
-        if (coversError) {
-          console.warn(`Failed to fetch covers for ${table}:`, coversError.message);
-        }
+        if (coversError) console.warn(`Covers fetch failed for ${tableName}:`, coversError.message);
 
-        // Map covers by item_id for quick lookup
+        // 6. Map covers by item_id for quick lookup
         const coverMap = {};
         covers?.forEach(c => {
           coverMap[c.item_id] = c;
         });
 
-        // Attach main cover to each item
+        // 7. Attach main cover as an array for frontend consistency
         items.forEach(itemRow => {
-          itemRow.content_covers = coverMap[itemRow.id] || null;
-          itemRow.item_type = table; // attach the type for frontend
+          const cover = coverMap[itemRow.id];
+          itemRow.content_covers = cover ? [cover] : [];
+          itemRow.item_type = tableName; // keep type for frontend routing
         });
 
         allContent.push(...items);
       } catch (innerErr) {
-        console.warn(`Skipping table ${table}:`, innerErr.message);
+        console.warn(`Skipping table ${tableName}:`, innerErr.message);
       }
     }
 
@@ -426,6 +423,7 @@ app.get("/api/users/:userId/content", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch user content" });
   }
 });
+
 
 
 
