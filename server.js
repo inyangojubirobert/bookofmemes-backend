@@ -506,43 +506,24 @@ app.get("/api/users/:userId/content", async (req, res) => {
   }
 });
 // GET /api/users/:userId
-app.get("/api/users/:userId", async (req, res) => {
-  const { userId } = req.params;
+// 1. Fetch all item types
+const { data: itemTypes, error: utError } = await supabase
+  .from("universal_items")
+  .select("item_type");
+if (utError) throw utError;
 
-  try {
-    const { data: profile, error } = await supabase
-      .from("profiles")
-      .select("id, username, full_name, avatar_url, bio")
-      .eq("id", userId)
-      .single();
+let postsCount = 0;
 
-    if (error || !profile) throw error || new Error("Profile not found");
+// 2. Loop through each type and count items
+for (const item of itemTypes) {
+  const table = item.item_type;
+  const { data: items, error } = await supabase
+    .from(table)
+    .select("id", { count: "exact", head: true })
+    .eq("author_id", userId);
+  if (!error) postsCount += items?.count || 0;
+}
 
-    // Fetch content counts
-    const { data: contents, error: contentError } = await supabase
-      .from("universal_items")
-      .select("item_type")
-      .eq("author_id", userId);
-
-    const postsCount = (contents || []).length;
-
-    // Followers / following counts
-    const [followers, following] = await Promise.all([
-      supabase.from("follows").select("*", { count: "exact", head: true }).eq("following_id", userId),
-      supabase.from("follows").select("*", { count: "exact", head: true }).eq("follower_id", userId),
-    ]);
-
-    res.json({
-      ...profile,
-      postsCount,
-      followersCount: followers?.count ?? 0,
-      followingCount: following?.count ?? 0,
-    });
-  } catch (err) {
-    console.error("Error fetching user profile:", err);
-    res.status(500).json({ error: "Failed to fetch user profile" });
-  }
-});
 
 
 
