@@ -99,6 +99,8 @@ app.get("/api/users/:id/following", async (req, res) => {
 // --------------------
 // Mount Routers
 // --------------------
+import walletTransactionsRouter from "./routes/walletTransactions.js";
+app.use("/api/wallet-transactions", walletTransactionsRouter);
 
 // --------------------
 // Health check
@@ -501,6 +503,44 @@ app.get("/api/users/:userId/content", async (req, res) => {
   } catch (err) {
     console.error("Error fetching user content:", err);
     res.status(500).json({ error: "Failed to fetch user content" });
+  }
+});
+// GET /api/users/:userId
+app.get("/api/users/:userId", async (req, res) => {
+  const { userId } = req.params;
+
+  try {
+    const { data: profile, error } = await supabase
+      .from("profiles")
+      .select("id, username, full_name, avatar_url, bio")
+      .eq("id", userId)
+      .single();
+
+    if (error || !profile) throw error || new Error("Profile not found");
+
+    // Fetch content counts
+    const { data: contents, error: contentError } = await supabase
+      .from("universal_items")
+      .select("item_type")
+      .eq("author_id", userId);
+
+    const postsCount = (contents || []).length;
+
+    // Followers / following counts
+    const [followers, following] = await Promise.all([
+      supabase.from("follows").select("*", { count: "exact", head: true }).eq("following_id", userId),
+      supabase.from("follows").select("*", { count: "exact", head: true }).eq("follower_id", userId),
+    ]);
+
+    res.json({
+      ...profile,
+      postsCount,
+      followersCount: followers?.count ?? 0,
+      followingCount: following?.count ?? 0,
+    });
+  } catch (err) {
+    console.error("Error fetching user profile:", err);
+    res.status(500).json({ error: "Failed to fetch user profile" });
   }
 });
 
