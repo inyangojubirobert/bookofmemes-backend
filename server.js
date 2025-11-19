@@ -1,3 +1,76 @@
+// --------------------
+// Follow/Unfollow API
+// --------------------
+// POST /api/follow - follow a user
+app.post("/api/follow", async (req, res) => {
+  const { follower_id, following_id } = req.body;
+  if (!follower_id || !following_id) {
+    return res.status(400).json({ error: "Missing follower_id or following_id" });
+  }
+  try {
+    // Insert or ignore if already exists
+    const { error } = await supabase
+      .from("follows")
+      .upsert({ follower_id, following_id }, { onConflict: ["follower_id", "following_id"] });
+    if (error) throw error;
+    res.json({ message: "Followed successfully" });
+  } catch (err) {
+    console.error("Follow error:", err);
+    res.status(500).json({ error: "Failed to follow user" });
+  }
+});
+
+// POST /api/unfollow - unfollow a user
+app.post("/api/unfollow", async (req, res) => {
+  const { follower_id, following_id } = req.body;
+  if (!follower_id || !following_id) {
+    return res.status(400).json({ error: "Missing follower_id or following_id" });
+  }
+  try {
+    const { error } = await supabase
+      .from("follows")
+      .delete()
+      .eq("follower_id", follower_id)
+      .eq("following_id", following_id);
+    if (error) throw error;
+    res.json({ message: "Unfollowed successfully" });
+  } catch (err) {
+    console.error("Unfollow error:", err);
+    res.status(500).json({ error: "Failed to unfollow user" });
+  }
+});
+
+// GET /api/users/:id/followers - get followers of a user
+app.get("/api/users/:id/followers", async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { data, error } = await supabase
+      .from("follows")
+      .select("follower_id, profiles:follower_id(full_name, avatar_url)")
+      .eq("following_id", id);
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) {
+    console.error("Fetch followers error:", err);
+    res.status(500).json({ error: "Failed to fetch followers" });
+  }
+});
+
+// GET /api/users/:id/following - get users this user is following
+app.get("/api/users/:id/following", async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { data, error } = await supabase
+      .from("follows")
+      .select("following_id, profiles:following_id(full_name, avatar_url)")
+      .eq("follower_id", id);
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) {
+    console.error("Fetch following error:", err);
+    res.status(500).json({ error: "Failed to fetch following" });
+  }
+});
 // server.js
 import express from "express";
 import cors from "cors";
