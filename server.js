@@ -5,18 +5,22 @@
 app.post("/api/follow", async (req, res) => {
   const { follower_id, following_id } = req.body;
   if (!follower_id || !following_id) {
-    return res.status(400).json({ error: "Missing follower_id or following_id" });
+    console.error("Follow API error: Missing follower_id or following_id", req.body);
+    return res.status(400).json({ error: "Missing follower_id or following_id", details: req.body });
   }
   try {
     // Insert or ignore if already exists
-    const { error } = await supabase
+    const { error, data } = await supabase
       .from("follows")
       .upsert({ follower_id, following_id }, { onConflict: ["follower_id", "following_id"] });
-    if (error) throw error;
-    res.json({ message: "Followed successfully" });
+    if (error) {
+      console.error("Supabase upsert error in /api/follow:", error, { follower_id, following_id });
+      return res.status(500).json({ error: "Failed to follow user", details: error.message, supabase: error });
+    }
+    res.json({ message: "Followed successfully", data });
   } catch (err) {
-    console.error("Follow error:", err);
-    res.status(500).json({ error: "Failed to follow user" });
+    console.error("Follow error (catch block):", err, { follower_id, following_id });
+    res.status(500).json({ error: "Failed to follow user", details: err.message });
   }
 });
 
