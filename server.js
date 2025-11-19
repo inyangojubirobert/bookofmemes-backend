@@ -1,3 +1,19 @@
+// server.js
+
+import express from "express";
+import cors from "cors";
+import dotenv from "dotenv";
+import { supabase } from "./config/db.js";
+dotenv.config();
+const app = express();
+const PORT = process.env.PORT || 5001;
+// --------------------
+// Middleware
+// --------------------
+app.use(cors());
+app.use(express.json());
+
+
 // --------------------
 // Follow/Unfollow API
 // --------------------
@@ -8,6 +24,7 @@ app.post("/api/follow", async (req, res) => {
     console.error("Follow API error: Missing follower_id or following_id", req.body);
     return res.status(400).json({ error: "Missing follower_id or following_id", details: req.body });
   }
+
   try {
     // Insert or ignore if already exists
     const { error, data } = await supabase
@@ -75,30 +92,13 @@ app.get("/api/users/:id/following", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch following" });
   }
 });
-// server.js
-import express from "express";
-import cors from "cors";
-import dotenv from "dotenv";
-import { supabase } from "./config/db.js";
 
 
 
-dotenv.config();
-
-const app = express();
-const PORT = process.env.PORT || 5001;
-
-// --------------------
-// Middleware
-// --------------------
-app.use(cors());
-app.use(express.json());
 
 // --------------------
 // Mount Routers
 // --------------------
-
-
 
 // --------------------
 // Health check
