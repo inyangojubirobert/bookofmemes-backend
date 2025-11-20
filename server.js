@@ -217,49 +217,56 @@ import walletTransactionsRouter from "./routes/walletTransactions.js";
 app.use("/api/wallet-transactions", walletTransactionsRouter);
 
 // --------------------
-// Health check
-// --------------------
-app.get("/", (req, res) => {
-  res.send("✅ BookOfMemes API running successfully");
-});
+  try {
+    // Fetch basic profile
+    const { data: profile, error: profileError } = await supabase
+      .from("profiles")
+      .select("id, full_name, username, bio, avatar_url")
+      .eq("id", id)
+      .single();
 
-// --------------------
-// Helper: Check if item exists
-// --------------------
-async function itemExists(itemId) {
-  const { data, error } = await supabase
-    .from("universal_items")
-    .select("id")
-    .eq("id", itemId)
-    .single();
+    if (profileError) {
+      console.error("Profile fetch error:", profileError);
+      throw profileError;
+    }
+    if (!profile) {
+      console.error("Profile not found for user id:", id);
+      return res.status(404).json({ error: "Profile not found" });
+    }
 
-  if (error && error.code !== "PGRST116") {
-    console.error("Error checking item existence:", error);
-    return false;
+    // Fetch posts count (use count property)
+    const [stories, memes, puzzles, kids] = await Promise.all([
+      supabase.from("stories").select("id", { count: "exact", head: true }).eq("author_id", id),
+      supabase.from("memes").select("id", { count: "exact", head: true }).eq("author_id", id),
+      supabase.from("puzzles").select("id", { count: "exact", head: true }).eq("author_id", id),
+      supabase.from("kids_collections").select("id", { count: "exact", head: true }).eq("author_id", id),
+    ]);
+    const totalPosts =
+      (stories?.count || 0) +
+      (memes?.count || 0) +
+      (puzzles?.count || 0) +
+      (kids?.count || 0);
+
+    // Fetch followers/following counts (use count property)
+    const followersRes = await supabase
+      .from("follows")
+      .select("follower_id", { count: "exact", head: true })
+      .eq("following_id", id);
+    const followingRes = await supabase
+      .from("follows")
+      .select("following_id", { count: "exact", head: true })
+      .eq("follower_id", id);
+
+    res.json({
+      ...profile,
+      postsCount: totalPosts,
+      followersCount: followersRes?.count ?? 0,
+      followingCount: followingRes?.count ?? 0,
+    });
+  } catch (err) {
+    console.error("Fetch user error:", err, "for user id:", req.params.id);
+    res.status(500).json({ error: "Failed to fetch user", details: err.message });
   }
-  return !!data;
-}
-
-// Resolve the owner/author of an item so comments can be addressed correctly
-async function getItemOwnerId(itemId) {
-  const { data, error } = await supabase
-    .from("universal_items")
-    .select("author_id, owner_id, user_id")
-    .eq("id", itemId)
-    .single();
-
-  if (error && error.code !== "PGRST116") {
-    console.error("Error fetching item owner:", error);
-    return null;
-  }
-
-  // Prefer explicit author_id, then owner_id, then user_id as a fallback
-  return data?.author_id || data?.owner_id || data?.user_id || null;
-}
-
-// --------------------
-// Stories
-// --------------------
 app.get("/api/stories", async (req, res) => {
   try {
     const { data, error } = await supabase
