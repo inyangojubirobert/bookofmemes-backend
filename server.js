@@ -143,14 +143,16 @@ app.get("/api/users/:id", async (req, res) => {
     if (profileError) throw profileError;
 
     // Fetch posts count
-    const counts = await Promise.all([
-      supabase.from("stories").select("id", { count: "exact" }).eq("author_id", id),
-      supabase.from("memes").select("id", { count: "exact" }).eq("author_id", id),
-      supabase.from("puzzles").select("id", { count: "exact" }).eq("author_id", id),
-      supabase.from("kids_collections").select("id", { count: "exact" }).eq("author_id", id),
-    ]);
+   // Fetch posts count
+const counts = await Promise.all([
+  supabase.from("stories").select("id", { count: "exact", head: true }).eq("author_id", id),
+  supabase.from("memes").select("id", { count: "exact", head: true }).eq("author_id", id),
+  supabase.from("puzzles").select("id", { count: "exact", head: true }).eq("author_id", id),
+  supabase.from("kids_collections").select("id", { count: "exact", head: true }).eq("author_id", id),
+]);
 
-    const totalPosts = counts.reduce((sum, c) => sum + (c.data?.length || 0), 0);
+const totalPosts = counts.reduce((sum, c) => sum + (c.count || 0), 0);
+
 
     // Fetch followers/following counts
     const { data: followersData } = await supabase
