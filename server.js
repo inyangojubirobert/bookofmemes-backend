@@ -142,34 +142,34 @@ app.get("/api/users/:id", async (req, res) => {
 
     if (profileError) throw profileError;
 
-    // Fetch posts count
-   // Fetch posts count
-const counts = await Promise.all([
-  supabase.from("stories").select("id", { count: "exact", head: true }).eq("author_id", id),
-  supabase.from("memes").select("id", { count: "exact", head: true }).eq("author_id", id),
-  supabase.from("puzzles").select("id", { count: "exact", head: true }).eq("author_id", id),
-  supabase.from("kids_collections").select("id", { count: "exact", head: true }).eq("author_id", id),
-]);
+    // Fetch posts count (use count property)
+    const [stories, memes, puzzles, kids] = await Promise.all([
+      supabase.from("stories").select("id", { count: "exact", head: true }).eq("author_id", id),
+      supabase.from("memes").select("id", { count: "exact", head: true }).eq("author_id", id),
+      supabase.from("puzzles").select("id", { count: "exact", head: true }).eq("author_id", id),
+      supabase.from("kids_collections").select("id", { count: "exact", head: true }).eq("author_id", id),
+    ]);
+    const totalPosts =
+      (stories?.count || 0) +
+      (memes?.count || 0) +
+      (puzzles?.count || 0) +
+      (kids?.count || 0);
 
-const totalPosts = counts.reduce((sum, c) => sum + (c.count || 0), 0);
-
-
-    // Fetch followers/following counts
-    const { data: followersData } = await supabase
+    // Fetch followers/following counts (use count property)
+    const followersRes = await supabase
       .from("follows")
-      .select("follower_id", { count: "exact" })
+      .select("follower_id", { count: "exact", head: true })
       .eq("following_id", id);
-
-    const { data: followingData } = await supabase
+    const followingRes = await supabase
       .from("follows")
-      .select("following_id", { count: "exact" })
+      .select("following_id", { count: "exact", head: true })
       .eq("follower_id", id);
 
     res.json({
       ...profile,
       postsCount: totalPosts,
-      followersCount: followersData?.length ?? 0,
-      followingCount: followingData?.length ?? 0,
+      followersCount: followersRes?.count ?? 0,
+      followingCount: followingRes?.count ?? 0,
     });
   } catch (err) {
     console.error("Fetch user error:", err);
