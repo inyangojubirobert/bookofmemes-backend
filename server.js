@@ -25,6 +25,75 @@ app.get("/api/users/:id/following", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch following" });
   }
 });
+// POST /api/follow - follow a user
+app.post("/api/follow", async (req, res) => {
+  const { follower_id, following_id } = req.body;
+
+  if (!follower_id || !following_id) {
+    return res.status(400).json({ error: "Missing follower_id or following_id" });
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from("follows")
+      .insert([{ follower_id, following_id }])
+      .select();
+
+    if (error) throw error;
+    res.json({ message: "Followed successfully", data });
+  } catch (err) {
+    console.error("Follow error:", err);
+    res.status(500).json({ error: "Failed to follow user" });
+  }
+});
+
+// DELETE /api/follow - unfollow a user
+app.delete("/api/follow", async (req, res) => {
+  const { follower_id, following_id } = req.body;
+
+  if (!follower_id || !following_id) {
+    return res.status(400).json({ error: "Missing follower_id or following_id" });
+  }
+
+  try {
+    const { error } = await supabase
+      .from("follows")
+      .delete()
+      .eq("follower_id", follower_id)
+      .eq("following_id", following_id);
+
+    if (error) throw error;
+    res.json({ message: "Unfollowed successfully" });
+  } catch (err) {
+    console.error("Unfollow error:", err);
+    res.status(500).json({ error: "Failed to unfollow user" });
+  }
+});
+
+// GET /api/follow/status?follower=xxx&following=yyy
+app.get("/api/follow/status", async (req, res) => {
+  const { follower, following } = req.query;
+
+  if (!follower || !following) {
+    return res.status(400).json({ error: "Missing follower or following" });
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from("follows")
+      .select("id")
+      .eq("follower_id", follower)
+      .eq("following_id", following)
+      .single();
+
+    if (error && error.code !== "PGRST116") throw error;
+
+    res.json({ isFollowing: !!data });
+  } catch (err) {
+    console.error("Follow status error:", err);
+    res.status(500).json({ error: "Failed to check follow status" });
+  }
+});
 
 
 
