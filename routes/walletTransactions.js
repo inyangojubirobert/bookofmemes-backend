@@ -1,6 +1,6 @@
-const express = require('express');
+import express from 'express';
+import WalletTransaction from '../models/walletTransaction.js';
 const router = express.Router();
-const WalletTransaction = require('../models/walletTransaction');
 
 // Get all wallet transactions
 router.get('/', async (req, res) => {

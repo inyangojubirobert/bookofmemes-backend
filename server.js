@@ -6,76 +6,9 @@ import dotenv from "dotenv";
 import { supabase } from "./config/db.js";
 dotenv.config();
 const app = express();
-const PORT = process.env.PORT || 5001;
-// --------------------
-// Middleware
-// --------------------
-app.use(cors());
-app.use(express.json());
+const PORT = process.env.PORT || 5002;
 
 
-// --------------------
-// Follow/Unfollow API
-// --------------------
-// POST /api/follow - follow a user
-app.post("/api/follow", async (req, res) => {
-  const { follower_id, following_id } = req.body;
-  if (!follower_id || !following_id) {
-    console.error("Follow API error: Missing follower_id or following_id", req.body);
-    return res.status(400).json({ error: "Missing follower_id or following_id", details: req.body });
-  }
-
-  try {
-    // Insert or ignore if already exists
-    const { error, data } = await supabase
-      .from("follows")
-      .upsert({ follower_id, following_id }, { onConflict: ["follower_id", "following_id"] });
-    if (error) {
-      console.error("Supabase upsert error in /api/follow:", error, { follower_id, following_id });
-      return res.status(500).json({ error: "Failed to follow user", details: error.message, supabase: error });
-    }
-    res.json({ message: "Followed successfully", data });
-  } catch (err) {
-    console.error("Follow error (catch block):", err, { follower_id, following_id });
-    res.status(500).json({ error: "Failed to follow user", details: err.message });
-  }
-});
-
-// POST /api/unfollow - unfollow a user
-app.post("/api/unfollow", async (req, res) => {
-  const { follower_id, following_id } = req.body;
-  if (!follower_id || !following_id) {
-    return res.status(400).json({ error: "Missing follower_id or following_id" });
-  }
-  try {
-    const { error } = await supabase
-      .from("follows")
-      .delete()
-      .eq("follower_id", follower_id)
-      .eq("following_id", following_id);
-    if (error) throw error;
-    res.json({ message: "Unfollowed successfully" });
-  } catch (err) {
-    console.error("Unfollow error:", err);
-    res.status(500).json({ error: "Failed to unfollow user" });
-  }
-});
-
-// GET /api/users/:id/followers - get followers of a user
-app.get("/api/users/:id/followers", async (req, res) => {
-  const { id } = req.params;
-  try {
-    const { data, error } = await supabase
-      .from("follows")
-      .select("follower_id, profiles:follower_id(full_name, avatar_url)")
-      .eq("following_id", id);
-    if (error) throw error;
-    res.json(data || []);
-  } catch (err) {
-    console.error("Fetch followers error:", err);
-    res.status(500).json({ error: "Failed to fetch followers" });
-  }
-});
 
 // GET /api/users/:id/following - get users this user is following
 app.get("/api/users/:id/following", async (req, res) => {
@@ -449,54 +382,50 @@ app.get("/api/users/:userId/content", async (req, res) => {
     const allContent = [];
 
     // 2. Loop through each item type dynamically
+
     for (const item of itemTypes) {
       const table = item.item_type;
+      // Fetch all items of this type for the user
+      const { data: items, error: itemsError } = await supabase
+        .from(table)
+        .select("*")
+        .eq("author_id", userId);
 
-      try {
-        // Fetch all items of this type for the user
-        const { data: items, error: itemsError } = await supabase
-          .from(table)
-          .select("*")
-          .eq("author_id", userId);
-
-        if (itemsError) {
-          console.warn(`Skipping ${table} due to fetch error:`, itemsError.message);
-          continue;
-        }
-
-        if (!items || items.length === 0) continue;
-
-        // Collect all item IDs for this table
-        const itemIds = items.map(i => i.id);
-
-        // Fetch all main covers for these items in ONE query
-        const { data: covers, error: coversError } = await supabase
-          .from("content_covers")
-          .select("item_id, image_url")
-          .in("item_id", itemIds)
-          .eq("item_type", table)
-          .eq("is_main_cover", true);
-
-        if (coversError) {
-          console.warn(`Failed to fetch covers for ${table}:`, coversError.message);
-        }
-
-        // Map covers by item_id for quick lookup
-        const coverMap = {};
-        covers?.forEach(c => {
-          coverMap[c.item_id] = c;
-        });
-
-        // Attach main cover to each item
-        items.forEach(itemRow => {
-          itemRow.content_covers = coverMap[itemRow.id] || null;
-          itemRow.item_type = table; // attach the type for frontend
-        });
-
-        allContent.push(...items);
-      } catch (innerErr) {
-        console.warn(`Skipping table ${table}:`, innerErr.message);
+      if (itemsError) {
+        console.warn(`Skipping ${table} due to fetch error:`, itemsError.message);
+        continue;
       }
+
+      if (!items || items.length === 0) continue;
+
+      // Collect all item IDs for this table
+      const itemIds = items.map(i => i.id);
+
+      // Fetch all main covers for these items in ONE query
+      const { data: covers, error: coversError } = await supabase
+        .from("content_covers")
+        .select("item_id, image_url")
+        .in("item_id", itemIds)
+        .eq("item_type", table)
+        .eq("is_main_cover", true);
+
+      if (coversError) {
+        console.warn(`Failed to fetch covers for ${table}:`, coversError.message);
+      }
+
+      // Map covers by item_id for quick lookup
+      const coverMap = {};
+      covers?.forEach(c => {
+        coverMap[c.item_id] = c;
+      });
+
+      // Attach main cover to each item
+      items.forEach(itemRow => {
+        itemRow.content_covers = coverMap[itemRow.id] || null;
+        itemRow.item_type = table; // attach the type for frontend
+      });
+
+      allContent.push(...items);
     }
 
     res.json(allContent);
@@ -505,24 +434,6 @@ app.get("/api/users/:userId/content", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch user content" });
   }
 });
-// GET /api/users/:userId
-// 1. Fetch all item types
-const { data: itemTypes, error: utError } = await supabase
-  .from("universal_items")
-  .select("item_type");
-if (utError) throw utError;
-
-let postsCount = 0;
-
-// 2. Loop through each type and count items
-for (const item of itemTypes) {
-  const table = item.item_type;
-  const { data: items, error } = await supabase
-    .from(table)
-    .select("id", { count: "exact", head: true })
-    .eq("author_id", userId);
-  if (!error) postsCount += items?.count || 0;
-}
 
 
 
