@@ -1,4 +1,4 @@
-// server.js
+
 
 import express from "express";
 import cors from "cors";
@@ -8,9 +8,25 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5001;
 
+// ...existing code...
+
 
 
 // GET /api/users/:id/following - get users this user is following
+app.get("/api/users/:id/followers", async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { data, error } = await supabase
+      .from("follows")
+      .select("follower_id, profiles:follower_id(full_name, avatar_url)")
+      .eq("following_id", id);
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) {
+    console.error("Fetch followers error:", err);
+    res.status(500).json({ error: "Failed to fetch followers" });
+  }
+});
 app.get("/api/users/:id/following", async (req, res) => {
   const { id } = req.params;
   try {
