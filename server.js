@@ -86,6 +86,96 @@ app.delete("/api/follow", async (req, res) => {
   }
 });
 
+app.get("/api/users/:id/posts/count", async (req, res) => {
+  const { id } = req.params;
+  try {
+    // Count stories
+    const { data: stories, error: storiesError } = await supabase
+      .from("stories")
+      .select("id", { count: "exact" })
+      .eq("author_id", id);
+
+    // Count memes
+    const { data: memes, error: memesError } = await supabase
+      .from("memes")
+      .select("id", { count: "exact" })
+      .eq("author_id", id);
+
+    // Count puzzles
+    const { data: puzzles, error: puzzlesError } = await supabase
+      .from("puzzles")
+      .select("id", { count: "exact" })
+      .eq("author_id", id);
+
+    // Count kids_collections
+    const { data: kidsCollections, error: kidsError } = await supabase
+      .from("kids_collections")
+      .select("id", { count: "exact" })
+      .eq("author_id", id);
+
+    // Throw if any query failed
+    if (storiesError || memesError || puzzlesError || kidsError)
+      throw storiesError || memesError || puzzlesError || kidsError;
+
+    const totalPosts =
+      (stories?.length || 0) +
+      (memes?.length || 0) +
+      (puzzles?.length || 0) +
+      (kidsCollections?.length || 0);
+
+    res.json({ postsCount: totalPosts });
+  } catch (err) {
+    console.error("Error counting posts:", err);
+    res.status(500).json({ error: "Failed to count posts" });
+  }
+});
+
+app.get("/api/users/:id", async (req, res) => {
+  const { id } = req.params;
+  try {
+    // Fetch basic profile
+    const { data: profile, error: profileError } = await supabase
+      .from("profiles")
+      .select("id, full_name, username, bio, avatar_url")
+      .eq("id", id)
+      .single();
+
+    if (profileError) throw profileError;
+
+    // Fetch posts count
+    const counts = await Promise.all([
+      supabase.from("stories").select("id", { count: "exact" }).eq("author_id", id),
+      supabase.from("memes").select("id", { count: "exact" }).eq("author_id", id),
+      supabase.from("puzzles").select("id", { count: "exact" }).eq("author_id", id),
+      supabase.from("kids_collections").select("id", { count: "exact" }).eq("author_id", id),
+    ]);
+
+    const totalPosts = counts.reduce((sum, c) => sum + (c.data?.length || 0), 0);
+
+    // Fetch followers/following counts
+    const { data: followersData } = await supabase
+      .from("follows")
+      .select("follower_id", { count: "exact" })
+      .eq("following_id", id);
+
+    const { data: followingData } = await supabase
+      .from("follows")
+      .select("following_id", { count: "exact" })
+      .eq("follower_id", id);
+
+    res.json({
+      ...profile,
+      postsCount: totalPosts,
+      followersCount: followersData?.length ?? 0,
+      followingCount: followingData?.length ?? 0,
+    });
+  } catch (err) {
+    console.error("Fetch user error:", err);
+    res.status(500).json({ error: "Failed to fetch user" });
+  }
+});
+
+
 // GET /api/follow/status?follower=xxx&following=yyy
 app.get("/api/follow/status", async (req, res) => {
   const { follower, following } = req.query;
