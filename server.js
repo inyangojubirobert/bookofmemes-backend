@@ -132,6 +132,7 @@ app.get("/api/users/:id/posts/count", async (req, res) => {
 
 app.get("/api/users/:id", async (req, res) => {
   const { id } = req.params;
+
   try {
     // Fetch basic profile
     const { data: profile, error: profileError } = await supabase
@@ -140,40 +141,43 @@ app.get("/api/users/:id", async (req, res) => {
       .eq("id", id)
       .single();
 
-    if (profileError) throw profileError;
+    if (profileError && profileError.code !== "PGRST116") throw profileError;
+    if (!profile) return res.status(404).json({ error: "User profile not found" });
 
-    // Fetch posts count (use count property)
+    // Count posts (using head: true for performance)
     const [stories, memes, puzzles, kids] = await Promise.all([
       supabase.from("stories").select("id", { count: "exact", head: true }).eq("author_id", id),
       supabase.from("memes").select("id", { count: "exact", head: true }).eq("author_id", id),
       supabase.from("puzzles").select("id", { count: "exact", head: true }).eq("author_id", id),
       supabase.from("kids_collections").select("id", { count: "exact", head: true }).eq("author_id", id),
     ]);
-    const totalPosts =
-      (stories?.count || 0) +
-      (memes?.count || 0) +
-      (puzzles?.count || 0) +
-      (kids?.count || 0);
 
-    // Fetch followers/following counts (use count property)
+    const totalPosts =
+      (stories.count || 0) +
+      (memes.count || 0) +
+      (puzzles.count || 0) +
+      (kids.count || 0);
+
+    // Followers / Following counts
     const followersRes = await supabase
       .from("follows")
-      .select("follower_id", { count: "exact", head: true })
+      .select("id", { count: "exact", head: true })
       .eq("following_id", id);
+
     const followingRes = await supabase
       .from("follows")
-      .select("following_id", { count: "exact", head: true })
+      .select("id", { count: "exact", head: true })
       .eq("follower_id", id);
 
-    res.json({
+    return res.json({
       ...profile,
       postsCount: totalPosts,
-      followersCount: followersRes?.count ?? 0,
-      followingCount: followingRes?.count ?? 0,
+      followersCount: followersRes.count || 0,
+      followingCount: followingRes.count || 0,
     });
   } catch (err) {
     console.error("Fetch user error:", err);
-    res.status(500).json({ error: "Failed to fetch user" });
+    return res.status(500).json({ error: "Failed to fetch user" });
   }
 });
 
