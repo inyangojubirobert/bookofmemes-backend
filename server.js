@@ -215,58 +215,6 @@ app.get("/api/follow/status", async (req, res) => {
 // --------------------
 import walletTransactionsRouter from "./routes/walletTransactions.js";
 app.use("/api/wallet-transactions", walletTransactionsRouter);
-
-// --------------------
-  try {
-    // Fetch basic profile
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("id, full_name, username, bio, avatar_url")
-      .eq("id", id)
-      .single();
-
-    if (profileError) {
-      console.error("Profile fetch error:", profileError);
-      throw profileError;
-    }
-    if (!profile) {
-      console.error("Profile not found for user id:", id);
-      return res.status(404).json({ error: "Profile not found" });
-    }
-
-    // Fetch posts count (use count property)
-    const [stories, memes, puzzles, kids] = await Promise.all([
-      supabase.from("stories").select("id", { count: "exact", head: true }).eq("author_id", id),
-      supabase.from("memes").select("id", { count: "exact", head: true }).eq("author_id", id),
-      supabase.from("puzzles").select("id", { count: "exact", head: true }).eq("author_id", id),
-      supabase.from("kids_collections").select("id", { count: "exact", head: true }).eq("author_id", id),
-    ]);
-    const totalPosts =
-      (stories?.count || 0) +
-      (memes?.count || 0) +
-      (puzzles?.count || 0) +
-      (kids?.count || 0);
-
-    // Fetch followers/following counts (use count property)
-    const followersRes = await supabase
-      .from("follows")
-      .select("follower_id", { count: "exact", head: true })
-      .eq("following_id", id);
-    const followingRes = await supabase
-      .from("follows")
-      .select("following_id", { count: "exact", head: true })
-      .eq("follower_id", id);
-
-    res.json({
-      ...profile,
-      postsCount: totalPosts,
-      followersCount: followersRes?.count ?? 0,
-      followingCount: followingRes?.count ?? 0,
-    });
-  } catch (err) {
-    console.error("Fetch user error:", err, "for user id:", req.params.id);
-    res.status(500).json({ error: "Failed to fetch user", details: err.message });
-  }
 app.get("/api/stories", async (req, res) => {
   try {
     const { data, error } = await supabase
