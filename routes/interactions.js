@@ -49,6 +49,31 @@ router.delete("/", async (req, res) => {
   res.json({ message: "Interaction removed" });
 });
 
+// GET /api/interactions/counts?item_id=...&item_type=...
+router.get("/counts", async (req, res) => {
+  const { item_id, item_type } = req.query;
+  if (!item_id || !item_type) {
+    return res.status(400).json({ error: "Missing item_id or item_type" });
+  }
+  // Group and count by interaction_type
+  const { data, error } = await supabase
+    .from("interactions")
+    .select("interaction_type, count:interaction_type", { count: 'exact', head: false })
+    .eq("item_id", item_id)
+    .eq("item_type", item_type)
+    .group('interaction_type');
+  if (error) return res.status(500).json({ error: error.message });
+
+  // Convert array of {interaction_type, count} to a simple object
+  const counts = { like: 0, comment: 0, view: 0, bookmark: 0, share: 0 };
+  if (Array.isArray(data)) {
+    data.forEach(row => {
+      counts[row.interaction_type] = Number(row.count) || 0;
+    });
+  }
+  res.json(counts);
+});
+
 // GET /api/interactions/users?item_id=...&item_type=...&interaction_type=...
 router.get("/users", async (req, res) => {
   const { item_id, item_type, interaction_type } = req.query;
