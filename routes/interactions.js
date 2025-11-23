@@ -4,6 +4,9 @@ import { supabase } from "../../src/config/supabaseClient.js";
 
 const router = express.Router();
 
+// Allowed interaction types
+const ALLOWED_TYPES = ["like", "comment", "view", "bookmark", "share"];
+
 /**
  * GET /api/interactions
  * Query params: user_id, item_id, item_type, interaction_type
@@ -38,9 +41,11 @@ router.post("/", async (req, res) => {
   if (!user_id || !item_id || !item_type || !interaction_type) {
     return res.status(400).json({ error: "Missing user_id, item_id, item_type, or interaction_type" });
   }
+  if (!ALLOWED_TYPES.includes(interaction_type)) {
+    return res.status(400).json({ error: `Invalid interaction_type. Allowed: ${ALLOWED_TYPES.join(", ")}` });
+  }
 
   try {
-    // Use upsert to avoid duplicates (unique constraint defined in DB)
     const { data, error } = await supabase
       .from("interactions")
       .upsert(
@@ -50,7 +55,7 @@ router.post("/", async (req, res) => {
       .select();
 
     if (error) throw error;
-    res.json(Array.isArray(data) && data[0] ? data[0] : data);
+    res.json(data?.[0] || null);
   } catch (err) {
     console.error("POST /api/interactions error:", err);
     res.status(500).json({ error: err.message || "Server error" });
@@ -96,26 +101,17 @@ router.get("/counts", async (req, res) => {
   }
 
   try {
-    // Group counts by interaction_type
-    const { data, error } = await supabase
-      .from("interactions")
-      .select("interaction_type", { count: "exact" })
-      .eq("item_id", item_id)
-      .eq("item_type", item_type)
-      .group("interaction_type");
+    const counts = {};
+    for (const type of ALLOWED_TYPES) {
+      const { count, error } = await supabase
+        .from("interactions")
+        .select("*", { count: "exact", head: true })
+        .eq("item_id", item_id)
+        .eq("item_type", item_type)
+        .eq("interaction_type", type);
 
-    if (error) throw error;
-
-    // Normalize to expected keys
-    const counts = { like: 0, comment: 0, view: 0, bookmark: 0, share: 0 };
-    if (Array.isArray(data)) {
-      data.forEach((row) => {
-        // Depending on Supabase/PostgREST output shape, row will have interaction_type and count
-        // Some setups return { interaction_type: 'like', count: '3' } or { interaction_type: 'like', count: 3 }
-        const k = row.interaction_type;
-        const v = Number(row.count ?? row.count_exact ?? 0);
-        if (k) counts[k] = Number.isFinite(v) ? v : counts[k];
-      });
+      if (error) throw error;
+      counts[type] = count || 0;
     }
     res.json(counts);
   } catch (err) {
@@ -144,7 +140,7 @@ router.get("/users", async (req, res) => {
       .order("created_at", { ascending: false });
 
     if (error) throw error;
-    res.json(data);
+    res.json(data || []);
   } catch (err) {
     console.error("GET /api/interactions/users error:", err);
     res.status(500).json({ error: err.message || "Server error" });
