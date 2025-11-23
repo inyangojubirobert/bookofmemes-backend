@@ -1,6 +1,6 @@
 // Backend/routes/interactions.js
 import express from "express";
-import { supabase } from "../../src/config/supabaseClient.js";
+import { supabase } from "../config/db.js";
 
 const router = express.Router();
 
