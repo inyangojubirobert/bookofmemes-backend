@@ -1,9 +1,11 @@
 
 
+
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import { supabase } from "./config/db.js";
+import interactionsRouter from "./routes/interactions.js";
 
 dotenv.config();
 const app = express();
@@ -15,9 +17,13 @@ const PORT = process.env.PORT || 5001;
 app.use(express.json());
 
 // 2. CORS
+
 app.use(cors({
   origin: "*", // or restrict to your frontend domain
 }));
+
+// Mount interactions router
+app.use("/api/interactions", interactionsRouter);
 
 // ...existing code...
 
