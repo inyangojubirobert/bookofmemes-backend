@@ -384,6 +384,27 @@ app.post("/api/comments", async (req, res) => {
   const { content, user_id, item_id, item_type, parent_id } = req.body;
   if (!content || !user_id || !item_id) return res.status(400).json({ error: "Missing required fields" });
 
+  // Helper: check if item exists in any content table
+  async function itemExists(itemId) {
+    // Try stories, memes, puzzles, kids_collections
+    const tables = ["stories", "memes", "puzzles", "kids_collections"];
+    for (const table of tables) {
+      const { data, error } = await supabase.from(table).select("id").eq("id", itemId).maybeSingle();
+      if (data && data.id) return true;
+    }
+    return false;
+  }
+
+  // Helper: get the owner/author of the item
+  async function getItemOwnerId(itemId) {
+    const tables = ["stories", "memes", "puzzles", "kids_collections"];
+    for (const table of tables) {
+      const { data, error } = await supabase.from(table).select("author_id").eq("id", itemId).maybeSingle();
+      if (data && data.author_id) return data.author_id;
+    }
+    return null;
+  }
+
   const exists = await itemExists(item_id);
   if (!exists) return res.status(404).json({ error: "Item not found" });
 
@@ -391,6 +412,18 @@ app.post("/api/comments", async (req, res) => {
     // Identify the item's owner to properly address the comment to the author
     const ownerId = await getItemOwnerId(item_id);
     if (!ownerId) return res.status(400).json({ error: "Could not resolve item owner" });
+
+    // If this is a reply, parent_id must exist in comments
+    if (parent_id) {
+      const { data: parentComment, error: parentError } = await supabase
+        .from("comments")
+        .select("id")
+        .eq("id", parent_id)
+        .maybeSingle();
+      if (!parentComment || parentError) {
+        return res.status(400).json({ error: "Parent comment not found" });
+      }
+    }
 
     const payload = { content, user_id, author_id: ownerId, item_id, item_type, parent_id: parent_id || null };
     const { data, error } = await supabase
