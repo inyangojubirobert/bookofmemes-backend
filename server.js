@@ -26,6 +26,28 @@ app.use(cors({
 app.use("/api/interactions", interactionsRouter);
 
 // ...existing code...
+// POST /api/share - record a share event
+app.post("/api/share", async (req, res) => {
+  const { user_id, item_id, item_type, author_id } = req.body;
+  if (!user_id || !item_id || !item_type) {
+    return res.status(400).json({ error: "Missing user_id, item_id, or item_type" });
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from("interactions")
+      .upsert([{ user_id, item_id, item_type, interaction_type: "share", author_id }], {
+        onConflict: ["user_id", "item_id", "item_type", "interaction_type"],
+      })
+      .select();
+
+    if (error) throw error;
+    res.json(data?.[0] || null);
+  } catch (err) {
+    console.error("POST /api/share error:", err);
+    res.status(500).json({ error: err.message || "Server error" });
+  }
+});
 
 
 
