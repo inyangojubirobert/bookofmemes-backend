@@ -5,7 +5,9 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import { supabase } from "./config/db.js";
+
 import interactionsRouter from "./routes/interactions.js";
+import bookmarksRouter from "./routes/bookmarks.js";
 
 dotenv.config();
 const app = express();
@@ -24,6 +26,8 @@ app.use(cors({
 
 // Mount interactions router
 app.use("/api/interactions", interactionsRouter);
+// Mount bookmarks router
+app.use("/api/bookmarks", bookmarksRouter);
 
 // ...existing code...
 // POST /api/share - record a share event

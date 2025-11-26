@@ -1,6 +1,6 @@
 // routes/bookmarks.js
 import express from "express";
-import { supabase } from "../config/supabaseClient.js";
+import { supabase } from "../config/db.js";
 
 const router = express.Router();
 
