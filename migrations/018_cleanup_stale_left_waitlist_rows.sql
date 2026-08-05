@@ -1,0 +1,15 @@
+-- One-time cleanup: game_waitlist rows created by the OLD leave_leadership_
+-- waitlist (before 017 changed it from a soft `status = 'left'` update to an
+-- outright DELETE) are still sitting in the table. game_waitlist has UNIQUE
+-- (circle_id, user_id) regardless of status, so each of these stale rows
+-- permanently blocks that specific user from ever rejoining that specific
+-- circle -- 017 only fixed the behavior going forward, it didn't retroactively
+-- clear out rows the old buggy version already left behind (confirmed live,
+-- 2026-08-05: 4 such rows existed, each still blocking a rejoin attempt).
+--
+-- Safe to run unconditionally: no code path creates a 'left' row anymore
+-- (017's version deletes instead), so this can never delete anything current
+-- or delete something a live user is relying on -- every wallet_holds row
+-- these referenced was already 'released' at leave time, so no held funds
+-- are affected either.
+DELETE FROM game_waitlist WHERE status = 'left';

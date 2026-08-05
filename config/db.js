@@ -1,31 +1,84 @@
 // config/db.js
-
 import { createClient } from '@supabase/supabase-js';
-import 'dotenv/config'; // Make sure dotenv is configured to load these variables
+import { Sequelize } from 'sequelize';
+import 'dotenv/config';
 
-// Retrieve credentials from environment variables
-const supabaseUrl = process.env.SUPABASE_URL;
-// For backend operations, we'll use the service role key for full access
-const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+// Determine environment
+const isServer = typeof window === 'undefined';
 
-// Basic check to ensure environment variables are loaded
-if (!supabaseUrl || !supabaseServiceRoleKey) {
-  console.error("Supabase URL or SERVICE_ROLE_KEY is missing! Check your .env file.");
-  // In a production app, you might want to stop the server from starting here
-  // process.exit(1);
+// Grab environment variables
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+// Debug logging
+console.log('--- Supabase Environment Check ---');
+console.log('Supabase URL:', SUPABASE_URL ? '✅ SET' : '❌ MISSING');
+console.log('Server key:', SUPABASE_SERVICE_ROLE_KEY ? '✅ SET' : '❌ MISSING');
+console.log('Anon key:', SUPABASE_ANON_KEY ? '✅ SET' : '❌ MISSING');
+console.log('Running on server:', isServer);
+console.log('---------------------------------');
+
+// Validate environment
+if (!SUPABASE_URL) {
+  console.error('❌ Supabase connection failed: Missing SUPABASE_URL');
+  process.exit(1);
+}
+if (isServer && !SUPABASE_SERVICE_ROLE_KEY) {
+  console.error('❌ Supabase connection failed: Missing SUPABASE_SERVICE_ROLE_KEY');
+  process.exit(1);
+}
+if (!isServer && !SUPABASE_ANON_KEY) {
+  console.error('❌ Supabase connection failed: Missing SUPABASE_ANON_KEY');
+  process.exit(1);
 }
 
-// Create a Supabase client for backend use (with service_role key)
-// This client bypasses Row Level Security and has full admin privileges.
-export const supabase = createClient(supabaseUrl, supabaseServiceRoleKey, {
+// Choose key
+const key = isServer ? SUPABASE_SERVICE_ROLE_KEY : SUPABASE_ANON_KEY;
+
+
+// Initialize Supabase client
+export const supabase = createClient(SUPABASE_URL, key, {
   auth: {
-    persistSession: false, // Prevents storing session in Node.js, good for stateless server
+    persistSession: false,
+    autoRefreshToken: false,
+  },
+  db: {
+    schema: 'public',
+  },
+  global: {
+    headers: {
+      'X-Application-Name': 'bookofmemes-server',
+    },
   },
 });
 
-console.log("Supabase client initialized for backend.");
+// Confirm connection setup (not testing the key)
+console.log(`✅ Supabase client initialized using ${isServer ? 'Service Role Key' : 'Anon Key'}`);
 
-// You might also want to export the SQL client if you still use it for specific purposes
-// For example, if you still had other PostgreSQL connection strings for non-Supabase DBs
-// import { neon } from '@neondatabase/serverless';
-// export const sql = neon(process.env.DATABASE_URL); // Only if you have a separate Neon DB
+// --- Sequelize Setup for Postgres ---
+const POSTGRES_DB = process.env.POSTGRES_DB;
+const POSTGRES_USER = process.env.POSTGRES_USER;
+const POSTGRES_PASSWORD = process.env.POSTGRES_PASSWORD;
+const POSTGRES_HOST = process.env.POSTGRES_HOST || 'localhost';
+const POSTGRES_PORT = process.env.POSTGRES_PORT || 5432;
+
+const sequelize = new Sequelize(POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD, {
+  host: POSTGRES_HOST,
+  port: POSTGRES_PORT,
+  dialect: 'postgres',
+  logging: false,
+});
+
+export default sequelize;
+
+// Optional helper
+export const handleSupabaseError = (error) => {
+  console.error('Supabase Error:', {
+    message: error.message,
+    code: error.code,
+    details: error.details,
+    hint: error.hint,
+  });
+  throw new Error('Database operation failed');
+};
