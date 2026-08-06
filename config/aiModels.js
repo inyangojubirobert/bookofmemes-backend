@@ -14,7 +14,15 @@ export const AI_MODELS = {
     PREMIUM: process.env.RUNWARE_IMAGE_HD_MODEL || 'bfl:5@1', // FLUX.2 [pro]
   },
   VIDEO: {
-    FREE: process.env.RUNWARE_VIDEO_FREE_MODEL || 'alibaba:wan@2.6-flash',
+    // 'alibaba:wan@2.6-flash' was never a real Runware model id -- confirmed
+    // live 2026-08-06 (see runwareRoutes.js's buildVideoTask comment): any
+    // videoInference request naming it failed with a generic, misleading
+    // "Invalid type for 'inputs'. 'inputs' must be an object" error instead
+    // of a clear "model not found", because Runware can't validate a request
+    // against an unrecognized model's actual schema. Replaced with the
+    // '-fast' (cheap/quick) sibling of the already-correct PREMIUM model --
+    // same vendor family, verified live via Runware's modelSearch API.
+    FREE: process.env.RUNWARE_VIDEO_FREE_MODEL || 'bytedance:seedance@2.0-fast',
     PREMIUM: process.env.RUNWARE_VIDEO_HD_MODEL || 'bytedance:seedance@2.0',
   },
   VOICE: {

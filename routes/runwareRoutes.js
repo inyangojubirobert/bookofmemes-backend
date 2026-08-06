@@ -124,8 +124,13 @@ function buildVideoTask(prompt, { hd, premium }) {
     taskUUID: crypto.randomUUID(),
     positivePrompt: prompt,
     model: useHdModel ? AI_MODELS.VIDEO.PREMIUM : AI_MODELS.VIDEO.FREE,
-    width: hd ? 1280 : 854,
-    height: hd ? 720 : 480,
+    // 864x496 (not the old 854x480) and 1280x720 are both confirmed-valid
+    // resolutions for the seedance/seedance-fast model family (verified live
+    // 2026-08-06) -- 854x480 isn't an allowed resolution for either model,
+    // so this would have 400'd for premium (non-HD) users too, not only free
+    // ones, once the model-id bug above stopped masking it.
+    width: hd ? 1280 : 864,
+    height: hd ? 720 : 496,
     duration: VIDEO_FREE_DURATION_SECONDS,
     numberResults: 1,
     deliveryMethod: 'async',
