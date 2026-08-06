@@ -177,7 +177,17 @@ async function generateVideo(prompt, { hd, premium }) {
 // pipeline. Cloudinary can ingest remote URLs directly, so neither the logo
 // nor the Runware output ever has to pass through our server.
 const WATERMARK_LOGO_URL = 'https://res.cloudinary.com/dljcj00ht/image/upload/v1756325607/BAscardoCoin_Logo_bvq8tx.png';
-const WATERMARK_LOGO_PUBLIC_ID = 'bookofmemes/watermark/bascardo_coin_logo';
+// Flat (no subfolders) on purpose -- a nested public_id like
+// 'bookofmemes/watermark/bascardo_coin_logo' broke every watermarked
+// generation with a 400 from Cloudinary ("Invalid transformation parameter -
+// bascardo"). The Node SDK's overlay/underlay public_id escaping only
+// converts the FIRST '/' in a public_id to ':' (the syntax an overlay layer
+// needs), not every '/' -- with two levels of nesting, the second slash was
+// left literal and Cloudinary's URL parser read it as the start of a new
+// transformation component, corrupting the whole chain. Confirmed live by
+// fetching the actual failing URL and reading Cloudinary's x-cld-error
+// header directly. A single-segment public_id has no slash left to mis-escape.
+const WATERMARK_LOGO_PUBLIC_ID = 'bascardo_watermark_logo';
 
 // Idempotent: Cloudinary treats an upload with an explicit public_id and
 // overwrite:false as "return the existing asset if there is one", so this is
