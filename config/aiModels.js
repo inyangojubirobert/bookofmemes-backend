@@ -12,6 +12,18 @@ export const AI_MODELS = {
   IMAGE: {
     FREE: process.env.RUNWARE_IMAGE_FREE_MODEL || 'runware:z-image@turbo',
     PREMIUM: process.env.RUNWARE_IMAGE_HD_MODEL || 'bfl:5@1', // FLUX.2 [pro]
+    // FLUX Redux is the Runware model specifically designed for reference-
+    // image-conditioned generation (referenceImages). It preserves the
+    // reference's identity/style much more strongly than seedImage img2img.
+    // Docs confirmed: referenceImages param + this model = identity/style
+    // preservation. IMPORTANT (2026-08-19): Runware now validates the `model`
+    // field against *AIR identifiers* (provider:model@version), NOT raw
+    // display names like 'civitai:flux1-redux@dev' -- anything else fails
+    // with "Invalid value for 'model' parameter. Model must be a string value
+    // representing a valid AR identifier." The current docs explicitly use
+    // `runware:400@1` as the valid AIR reference-model id. Override via
+    // RUNWARE_IMAGE_REFERENCE_MODEL if your dashboard uses a different id.
+    REFERENCE: process.env.RUNWARE_IMAGE_REFERENCE_MODEL || 'runware:400@1',
   },
   VIDEO: {
     // 'alibaba:wan@2.6-flash' was never a real Runware model id -- confirmed

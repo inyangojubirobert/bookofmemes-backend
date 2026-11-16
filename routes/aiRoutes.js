@@ -5,7 +5,7 @@ import { supabase } from '../config/db.js';
 import { ITEM_TYPES, CONTENT_TYPES, ALL_TYPES } from '../config/itemTypes.js';
 import { authenticateToken } from '../auth.js';
 import { isPremium } from '../utils/isPremium.js';
-import { userScopedClient, tokenFromRequest } from '../utils/supabaseUserClient.js';
+import { CREDIT_PRICES, formatCredits, creditsToLogUnits, hasCredits, chargeCredits } from '../utils/credits.js';
 import { makeDailyCounter } from '../utils/dailyQuota.js';
 import { logGeneration } from '../utils/aiGenerationLog.js';
 
@@ -150,7 +150,7 @@ router.get('/languages', (_req, res) => {
 // the "Generate Bascardo AI Content" writing tab, not the general assistant.
 const WRITE_FREE_DAILY_LIMIT = 10;
 const WRITE_PREMIUM_DAILY_LIMIT = 100;
-const WRITE_OVERAGE_COST_TOKENS = 2; // BASC per generation once the daily free cap is used up
+const WRITE_OVERAGE_COST = CREDIT_PRICES.writeOverage; // credits per generation once the daily free cap is used up
 const writeQuota = makeDailyCounter();
 
 const BASCARDO_WRITE_SYSTEM_PROMPT = `You write short-form content for Bascardo/Bookofmemes creators -- meme captions, story openers/synopses, video and podcast titles, one-liners, outlines. Match the requested format; if none is specified, infer the most likely one from the prompt (a caption request gets a caption, a "write a story about X" request gets a short punchy opening, etc). Keep it tight and native to the platform's voice -- witty, conversational, never corporate. Return ONLY the requested text, no preamble, no explanation, no quotes around it.`;
@@ -160,7 +160,7 @@ router.get('/write/quota', authenticateToken, async (req, res) => {
   try {
     const premium = await isPremium(req.user.id);
     const limit = premium ? WRITE_PREMIUM_DAILY_LIMIT : WRITE_FREE_DAILY_LIMIT;
-    res.json({ success: true, data: { limit, remaining: Math.max(0, limit - writeQuota.usedToday(req.user.id)), overageCostTokens: WRITE_OVERAGE_COST_TOKENS, premium } });
+    res.json({ success: true, data: { limit, remaining: Math.max(0, limit - writeQuota.usedToday(req.user.id)), overageCostCredits: WRITE_OVERAGE_COST, premium } });
   } catch (err) {
     console.error('Write quota error:', err);
     res.status(500).json({ success: false, error: 'Failed to load quota' });
@@ -183,11 +183,10 @@ router.post('/write', authenticateToken, async (req, res) => {
     const overFreeCap = writeQuota.usedToday(userId) >= limit;
 
     if (overFreeCap) {
-      const { data: wallet } = await supabase.from('wallets').select('token_balance').eq('user_id', userId).single();
-      if ((wallet?.token_balance || 0) < WRITE_OVERAGE_COST_TOKENS) {
+      if (!(await hasCredits(userId, WRITE_OVERAGE_COST))) {
         return res.status(429).json({
           success: false,
-          error: `Free daily limit of ${limit} reached. Extra generations cost ${WRITE_OVERAGE_COST_TOKENS} Bascardo Tokens -- top up to continue.`,
+          error: `Free daily limit of ${limit} reached. Extra generations cost ${formatCredits(WRITE_OVERAGE_COST)} in credits -- buy credits in your Wallet to continue.`,
         });
       }
     }
@@ -203,17 +202,12 @@ router.post('/write', authenticateToken, async (req, res) => {
 
     let charged = false;
     if (overFreeCap) {
-      const { data: chargeRows, error: chargeError } = await userScopedClient(tokenFromRequest(req)).rpc('spend_tokens', {
-        p_amount: WRITE_OVERAGE_COST_TOKENS,
-        p_description: 'Bascardo AI Content — writing (overage)',
-      });
-      if (chargeError) throw chargeError;
-      charged = !!chargeRows?.[0]?.success;
+      charged = await chargeCredits(req, WRITE_OVERAGE_COST, 'Bascardo AI Content — writing (overage)');
     } else {
       writeQuota.record(userId);
     }
 
-    logGeneration({ userId, feature: 'text', model: 'claude-haiku-4-5-20251001', provider: 'anthropic', requestId: message.id, inputPrompt: prompt.trim(), tier: overFreeCap ? 'hd' : (premium ? 'premium_free' : 'free'), costTokens: charged ? WRITE_OVERAGE_COST_TOKENS : 0, success: true, outputUrl: null });
+    logGeneration({ userId, feature: 'text', model: 'claude-haiku-4-5-20251001', provider: 'anthropic', requestId: message.id, inputPrompt: prompt.trim(), tier: overFreeCap ? 'hd' : (premium ? 'premium_free' : 'free'), costTokens: charged ? creditsToLogUnits(WRITE_OVERAGE_COST) : 0, success: true, outputUrl: null });
     res.json({ success: true, data: { text, charged } });
   } catch (err) {
     console.error('AI write error:', err);

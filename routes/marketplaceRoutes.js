@@ -399,45 +399,18 @@ router.get('/items/:itemType/:itemId/ownership', async (req, res) => {
   }
 });
 
-// Expires past-due listings/bids (DB triggers cascade the resulting hold releases
-// and bid rejections -- see 030's header comment). Shared by the HTTP route below
-// (for an external scheduler, or manual curl testing) and the in-app timer started
-// from server.js (startMarketplaceSweepTimer) -- same logic, two ways to trigger it.
+// Runs the marketplace deadlines in the database (migration 055):
+// ending reminders, moving ended listings with bids into the owner's decision
+// window, auto-awarding the highest bid that meets the reserve when the window
+// closes, expiring listings without bids (paid bids are refunded by trigger),
+// un-featuring, and failing abandoned payment sessions. pg_cron runs the same
+// function every 5 minutes; this timer is a backup for when pg_cron isn't on.
+// Never expire listings or bids directly here: that would skip the decision
+// window and the automatic award.
 export async function runMarketplaceSweep() {
-  const nowIso = new Date().toISOString();
-
-  const { data: expiredListings, error: listingsError } = await supabase
-    .from('marketplace_listings')
-    .update({ status: 'expired', updated_at: new Date() })
-    .eq('status', 'active')
-    .not('expires_at', 'is', null)
-    .lt('expires_at', nowIso)
-    .select('id');
-  if (listingsError) throw listingsError;
-
-  const { data: expiredBids, error: bidsError } = await supabase
-    .from('marketplace_bids')
-    .update({ status: 'expired', decided_at: new Date() })
-    .eq('status', 'active')
-    .lt('expires_at', nowIso)
-    .select('id');
-  if (bidsError) throw bidsError;
-
-  // Featured upgrades fall back to normal placement once they expire -- same
-  // sweep, no separate "daily job" needed.
-  const { data: unfeatured, error: featuredError } = await supabase
-    .from('marketplace_listings')
-    .update({ featured: false, updated_at: new Date() })
-    .eq('featured', true)
-    .lt('featured_until', nowIso)
-    .select('id');
-  if (featuredError) throw featuredError;
-
-  return {
-    expiredListings: expiredListings?.length || 0,
-    expiredBids: expiredBids?.length || 0,
-    unfeatured: unfeatured?.length || 0,
-  };
+  const { data, error } = await supabase.rpc('process_marketplace_deadlines');
+  if (error) throw error;
+  return data;
 }
 
 // Starts the in-app sweep timer. Only runs while this server process is alive --
@@ -454,32 +427,6 @@ export function startMarketplaceSweepTimer(intervalMs = 15 * 60 * 1000) {
       .catch((err) => console.error('[marketplace sweep] failed:', err.message));
   };
   sweep(); // run once at startup, then on the interval
-  setInterval(sweep, intervalMs);
-}
-
-// Releases agent cashout orders a matched agent never confirmed within their
-// 24h window (Backend/migrations/045_agent_cashout_fulfillment.sql). Same
-// two-ways-to-trigger shape as runMarketplaceSweep, but the actual release
-// logic lives in the sweep_expired_agent_orders() Postgres function since it
-// has to atomically touch wallet_holds/trade_escrow/agents/cashout_requests
-// per order -- not a good fit for chained .update() calls from here.
-export async function runAgentCashoutSweep() {
-  const { data, error } = await supabase.rpc('sweep_expired_agent_orders');
-  if (error) throw error;
-  return { releasedOrders: data || 0 };
-}
-
-export function startAgentCashoutSweepTimer(intervalMs = 15 * 60 * 1000) {
-  const sweep = () => {
-    runAgentCashoutSweep()
-      .then(({ releasedOrders }) => {
-        if (releasedOrders) {
-          console.log(`[agent cashout sweep] released ${releasedOrders} expired order(s)`);
-        }
-      })
-      .catch((err) => console.error('[agent cashout sweep] failed:', err.message));
-  };
-  sweep();
   setInterval(sweep, intervalMs);
 }
 

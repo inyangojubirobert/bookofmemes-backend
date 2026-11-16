@@ -3,7 +3,7 @@ import crypto from 'crypto';
 import { supabase } from '../config/db.js';
 import { authenticateToken } from '../auth.js';
 import { isPremium } from '../utils/isPremium.js';
-import { userScopedClient, tokenFromRequest } from '../utils/supabaseUserClient.js';
+import { CREDIT_PRICES, formatCredits, creditsToLogUnits, hasCredits, chargeCredits } from '../utils/credits.js';
 import { monthlyUsage, recordMonthlyUsage } from '../utils/monthlyQuota.js';
 import { logGeneration } from '../utils/aiGenerationLog.js';
 import { AI_MODELS, AI_VOICE_PRESETS } from '../config/aiModels.js';
@@ -46,7 +46,7 @@ const RUNWARE_API_KEY = process.env.RUNWARE_API_KEY;
 const CHARS_PER_SECOND = 15; // ~150 wpm, ~6 chars/word incl. spaces
 const FREE_SECONDS_PER_MONTH = 120; // 2 minutes/month
 const PREMIUM_SECONDS_PER_MONTH = 1800; // 30 minutes/month
-const HD_COST_TOKENS_PER_MINUTE = 10; // matches the $10-credit example: "Podcast: ElevenLabs = 10 credits/minute"
+const HD_COST_PER_MINUTE = CREDIT_PRICES.voiceHdPerMinute; // credits per started minute of HD narration
 const MAX_CHARS_PER_REQUEST = 1200; // ~80s -- keeps any single call bounded regardless of tier
 
 function estimateSeconds(text) {
@@ -113,7 +113,7 @@ router.get('/quota', authenticateToken, async (req, res) => {
         premium,
         limitSeconds,
         remainingSeconds: Math.max(0, limitSeconds - usedSeconds),
-        hdCostTokensPerMinute: HD_COST_TOKENS_PER_MINUTE,
+        hdCostCreditsPerMinute: HD_COST_PER_MINUTE,
         maxCharsPerRequest: MAX_CHARS_PER_REQUEST,
         configured: !!RUNWARE_API_KEY,
         period: 'month',
@@ -129,8 +129,8 @@ router.get('/quota', authenticateToken, async (req, res) => {
 // Body: { text: string, hd?: boolean }
 // Free: counts against the monthly 2-minute (30 min for Premium) budget. HD
 // (or Premium subscribers automatically): routed to the higher-quality model;
-// HD specifically also skips the budget and costs HD_COST_TOKENS_PER_MINUTE
-// Bascardo Tokens per minute (rounded up).
+// HD specifically also skips the budget and costs HD_COST_PER_MINUTE
+// credits per started minute.
 router.post('/narrate', authenticateToken, async (req, res) => {
   if (!RUNWARE_API_KEY) {
     return res.status(501).json({ success: false, error: 'Voice narration is not configured yet' });
@@ -149,12 +149,11 @@ router.post('/narrate', authenticateToken, async (req, res) => {
 
   try {
     const premium = await isPremium(userId);
-    let costTokens = 0;
+    let cost = 0;
     if (hd) {
-      costTokens = Math.ceil(seconds / 60) * HD_COST_TOKENS_PER_MINUTE;
-      const { data: wallet } = await supabase.from('wallets').select('token_balance').eq('user_id', userId).single();
-      if ((wallet?.token_balance || 0) < costTokens) {
-        return res.status(402).json({ success: false, error: `This would cost ${costTokens} Bascardo Tokens. Top up your balance and try again.` });
+      cost = Math.round(Math.ceil(seconds / 60) * HD_COST_PER_MINUTE * 100) / 100;
+      if (!(await hasCredits(userId, cost))) {
+        return res.status(402).json({ success: false, error: `This would cost ${formatCredits(cost)} in credits. Buy credits in your Wallet and try again.` });
       }
     } else {
       const limitSeconds = premium ? PREMIUM_SECONDS_PER_MONTH : FREE_SECONDS_PER_MONTH;
@@ -162,7 +161,7 @@ router.post('/narrate', authenticateToken, async (req, res) => {
       if (usedSeconds + seconds > limitSeconds) {
         return res.status(429).json({
           success: false,
-          error: `This would use more than your remaining free narration time this month (${Math.max(0, limitSeconds - usedSeconds)}s left). Try HD (spends Bascardo Tokens) or shorten the text.`,
+          error: `This would use more than your remaining free narration time this month (${Math.max(0, limitSeconds - usedSeconds)}s left). Try HD (uses credits) or shorten the text.`,
         });
       }
     }
@@ -172,17 +171,12 @@ router.post('/narrate', authenticateToken, async (req, res) => {
     let charged = false;
 
     if (hd) {
-      const { data: chargeRows, error: chargeError } = await userScopedClient(tokenFromRequest(req)).rpc('spend_tokens', {
-        p_amount: costTokens,
-        p_description: 'Bascardo AI Content — HD narration',
-      });
-      if (chargeError) throw chargeError;
-      charged = !!chargeRows?.[0]?.success;
+      charged = await chargeCredits(req, cost, 'Bascardo AI Content — HD narration');
     } else {
       await recordMonthlyUsage(userId, 'voice', seconds, 'seconds');
     }
 
-    logGeneration({ userId, feature: 'voice', model: modelUsed, provider: 'runware', requestId: taskUUID, durationSeconds: seconds, inputPrompt: text.trim(), tier: hd ? 'hd' : (premium ? 'premium_free' : 'free'), costTokens: charged ? costTokens : 0, success: true, outputUrl: audioUrl, latencyMs, providerCost, providerHttpStatus });
+    logGeneration({ userId, feature: 'voice', model: modelUsed, provider: 'runware', requestId: taskUUID, durationSeconds: seconds, inputPrompt: text.trim(), tier: hd ? 'hd' : (premium ? 'premium_free' : 'free'), costTokens: charged ? creditsToLogUnits(cost) : 0, success: true, outputUrl: audioUrl, latencyMs, providerCost, providerHttpStatus });
     res.json({ success: true, data: { audioUrl, hd, charged, estimatedSeconds: seconds } });
   } catch (err) {
     console.error('Voice narration error:', err);

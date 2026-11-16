@@ -4,113 +4,27 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import crypto from "crypto";
 import { supabase } from "./config/db.js";
 import { ITEM_TYPES, ALL_TYPES, CONTENT_TYPES } from "./config/itemTypes.js";
 
 import interactionsRouter from "./routes/interactions.js";
 import bookmarksRouter from "./routes/bookmarks.js";
-import depositRoutes from './routes/deposits.js';
-import bankDetailsRoutes from "./routes/bankDetailsRoutes.js";
-import cashoutRoutes from "./routes/cashoutRoutes.js";
-import walletTransactionsRouter from "./routes/walletTransactions.js";
 import walletRoutes from "./routes/walletRoutes.js";
-import transferRoutes from "./routes/transferRoutes.js";
-import tokenRoutes from "./routes/tokenRoutes.js";
 import premiumRoutes from "./routes/premiumRoutes.js";
-import rewardsRoutes from "./routes/rewardsRoutes.js";
-import affiliateRoutes from "./routes/affiliateRoutes.js";
-import currencyRoutes, { startExchangeRateRefreshTimer } from "./routes/currencyRoutes.js";
+import billingRoutes, { startVoidedPurchaseSweepTimer } from "./routes/billingRoutes.js";
 import aiRoutes from "./routes/aiRoutes.js";
 import runwareRoutes from "./routes/runwareRoutes.js";
 import voiceRoutes from "./routes/voiceRoutes.js";
 import uploadRoutes from "./routes/uploadRoutes.js";
-import bascardoRoutes from "./routes/bascardoRoutes.js";
-import rewardDistributorRoutes from "./routes/rewardDistributorRoutes.js";
-import walletApiV1 from "./routes/v1/walletApiRouter.js";
-import marketplaceRoutes, { startMarketplaceSweepTimer, startAgentCashoutSweepTimer } from "./routes/marketplaceRoutes.js";
+import marketplaceRoutes, { startMarketplaceSweepTimer } from "./routes/marketplaceRoutes.js";
 import { startLeadershipGamesSweepTimer } from "./routes/leadershipGamesRoutes.js";
+import linkPreviewRoutes from "./routes/linkPreviewRoutes.js";
+import marketRoutes, { accountRouter, startMarketTimers } from "./routes/marketRoutes.js";
 
 
 dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5001;
-
-// Paystack webhook — raw body REQUIRED for signature verification; must be before express.json()
-app.post('/api/deposits/webhook/paystack', express.raw({ type: 'application/json' }), async (req, res) => {
-  try {
-    const signature = req.headers['x-paystack-signature'];
-    const hash = crypto
-      .createHmac('sha512', process.env.PAYSTACK_SECRET_KEY)
-      .update(req.body)
-      .digest('hex');
-
-    if (hash !== signature) {
-      return res.status(400).json({ error: 'Invalid signature' });
-    }
-
-    const event = JSON.parse(req.body);
-
-    if (event.event === 'charge.success') {
-      const { reference, status } = event.data;
-      if (status !== 'success') return res.sendStatus(200);
-
-      const { data: deposit } = await supabase
-        .from('deposits').select('*').eq('reference', reference).single();
-
-      if (!deposit || deposit.status === 'completed') return res.sendStatus(200);
-
-      // wallet_balance (USD) is the one spendable ledger -- same fix as
-      // Backend/routes/deposits.js's /verify handler. This webhook still called
-      // credit_wallet_currency unconditionally, which is the same bug class that
-      // stranded real money in wallet_currencies before (migration 035).
-      if (deposit.currency === 'USD') {
-        const { data: walletRow } = await supabase.from('wallets').select('wallet_balance').eq('id', deposit.wallet_id).single();
-        await supabase.from('wallets').update({ wallet_balance: Number(walletRow?.wallet_balance || 0) + Number(deposit.amount) }).eq('id', deposit.wallet_id);
-      } else {
-        const { error: creditError } = await supabase.rpc('credit_wallet_currency', {
-          p_wallet_id: deposit.wallet_id,
-          p_currency: deposit.currency,
-          p_amount: deposit.amount,
-        });
-        // Leave the deposit 'pending' on failure -- Paystack will retry this
-        // webhook, which retries the credit, instead of the payment silently
-        // being marked done with no money actually reaching the wallet.
-        if (creditError) {
-          console.error('credit_wallet_currency error:', creditError.message);
-          return res.sendStatus(200);
-        }
-      }
-
-      await supabase.from('deposits').update({
-        status: 'completed',
-        ...(deposit.currency === 'USD' ? { exchange_rate: 1.0, credited_usd_amount: deposit.amount } : {}),
-      }).eq('id', deposit.id);
-
-      await supabase.from('wallet_transactions').insert([{
-        wallet_id: deposit.wallet_id,
-        currency_code: deposit.currency,
-        type: 'deposit',
-        amount: deposit.amount,
-        description: 'Deposit via bank transfer',
-        metadata: { reference },
-        status: 'completed',
-      }]);
-
-      await supabase.from('deposit_notifications').insert([{
-        user_id: deposit.user_id,
-        deposit_id: deposit.id,
-        title: 'Deposit Successful',
-        message: `Your deposit of ${deposit.amount} ${deposit.currency} was successful`,
-      }]);
-    }
-
-    res.sendStatus(200);
-  } catch (err) {
-    console.error('Paystack webhook error:', err);
-    res.sendStatus(200); // always 200 so Paystack doesn't retry indefinitely
-  }
-});
 
 // 1. JSON parser
 app.use(express.json());
@@ -128,39 +42,28 @@ app.use(cors({
 app.use("/api/interactions", interactionsRouter);
 app.use("/api/bookmarks", bookmarksRouter);
 
-// Payments & Wallet
-app.use("/api/deposits", depositRoutes);
-app.use("/api/cashout", cashoutRoutes);
-app.use("/api/bank-details", bankDetailsRoutes);
-app.use("/api/wallet-transactions", walletTransactionsRouter);
+// Wallet (in-app credits) & Google Play Billing
 app.use("/api/wallet", walletRoutes);
-app.use("/api/transfers", transferRoutes);
-app.use("/api/tokens", tokenRoutes);
 app.use("/api/premium", premiumRoutes);
-app.use("/api/rewards", rewardsRoutes);
-app.use("/api/affiliates", affiliateRoutes);
-app.use("/api/currencies", currencyRoutes);
+app.use("/api/billing", billingRoutes);
 
 // Marketplace (list/bid/buy-now/ownership for stories, memes, puzzles,
 // kids_collections, music_box, podcast_box, tv_box)
 app.use("/api/marketplace", marketplaceRoutes);
+app.use("/api/market", marketRoutes);      // real-money marketplace (migration 055)
+app.use("/api/account", accountRouter);    // account deletion
 
 // AI features
 app.use("/api/ai", aiRoutes);
 app.use("/api/ai/runware", runwareRoutes);
 app.use("/api/ai/voice", voiceRoutes);
 
-// Bascardo on-chain token (BSC)
-app.use("/api/bascardo", bascardoRoutes);
-
-// Bascardo on-chain reward distributor (internal — protected by DISTRIBUTOR_SECRET)
-app.use("/api/rewards", rewardDistributorRoutes);
-
-// ── Wallet Public API v1 (API-key authenticated, stable versioned routes) ──
-app.use("/v1/wallet", walletApiV1);
 
 // File uploads (Cloudinary)
 app.use("/api/upload", uploadRoutes);
+
+// Link previews (Microlink proxy — fetches title/description/thumbnail server-side)
+app.use("/api/link-preview", linkPreviewRoutes);
 
 
 // ...existing code...
@@ -1105,7 +1008,7 @@ app.get("/api/profiles-list", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   startMarketplaceSweepTimer();
-  startExchangeRateRefreshTimer();
-  startAgentCashoutSweepTimer();
+  startMarketTimers();
   startLeadershipGamesSweepTimer();
+  startVoidedPurchaseSweepTimer();
 });

@@ -4,7 +4,7 @@ import { v2 as cloudinary } from 'cloudinary';
 import { supabase } from '../config/db.js';
 import { authenticateToken } from '../auth.js';
 import { isPremium } from '../utils/isPremium.js';
-import { userScopedClient, tokenFromRequest } from '../utils/supabaseUserClient.js';
+import { CREDIT_PRICES, formatCredits, creditsToLogUnits, hasCredits, chargeCredits } from '../utils/credits.js';
 import { monthlyUsage, recordMonthlyUsage } from '../utils/monthlyQuota.js';
 import { logGeneration } from '../utils/aiGenerationLog.js';
 import { AI_MODELS } from '../config/aiModels.js';
@@ -57,17 +57,17 @@ cloudinary.config({
 // Free previews are low-res/short and capped per MONTH (not per day -- images
 // and video cost real money per generation, so the free allowance has to
 // stay small at scale: e.g. 10k free users x 5 images/month is a bounded
-// bill, x 5 images/day is not). HD spends Bascardo Tokens instead of
+// bill, x 5 images/day is not). HD spends in-app credits instead of
 // counting against either cap, so a user who blows through their monthly
 // free allowance can still pay per-generation rather than being hard-blocked.
 const IMAGE_FREE_MONTHLY_LIMIT = 5;
 const IMAGE_PREMIUM_MONTHLY_LIMIT = 100;
-const IMAGE_HD_COST_TOKENS = 15; // 100 BASC = $1 (tokenRoutes.js pack_100), so 15 BASC ~= $0.15/HD image
+const IMAGE_HD_COST = CREDIT_PRICES.imageHd;
 
 const VIDEO_FREE_MONTHLY_LIMIT = 1;
 const VIDEO_PREMIUM_MONTHLY_LIMIT = 20;
 const VIDEO_FREE_DURATION_SECONDS = 5;
-const VIDEO_HD_COST_TOKENS = 60; // video generation runs far more than images provider-side -- priced accordingly
+const VIDEO_HD_COST = CREDIT_PRICES.videoHd; // video runs far more than images provider-side -- priced accordingly
 
 // Returns { data, status } -- status is the raw HTTP status Runware
 // responded with, carried through so callers can log it even on success (not
@@ -89,19 +89,41 @@ async function callRunwareTasks(tasks) {
   return { data: json?.data || [], status: response.status };
 }
 
-async function generateImage(prompt, { hd, premium }) {
-  const useHdModel = hd || premium;
+async function generateImage(prompt, { hd, premium, referenceImageUrl }) {
+  // When a reference image is provided, use FLUX Redux -- the Runware model
+  // purpose-built for reference-conditioned generation (identity/style
+  // preservation). Its task schema uses `referenceImages` (NOT `seedImage`);
+  // plain seedImage/img2img only loosely guides composition and does NOT
+  // preserve the reference's identity, which is exactly the user complaint
+  // this fixes. FLUX Redux is designed for exactly this workflow, so when a
+  // reference image is attached, prefer it over the generic free/HD models.
+  // But unlike seedImage (which works on any model), referenceImages is only
+  // valid on models that support it -- using it on z-image@turbo or bfl:5@1
+  // would be a no-op or validation error, hence the dedicated REFERENCE model.
+  const model = referenceImageUrl
+    ? AI_MODELS.IMAGE.REFERENCE
+    : (hd || premium ? AI_MODELS.IMAGE.PREMIUM : AI_MODELS.IMAGE.FREE);
   const task = {
     taskType: 'imageInference',
     taskUUID: crypto.randomUUID(),
     positivePrompt: prompt,
-    model: useHdModel ? AI_MODELS.IMAGE.PREMIUM : AI_MODELS.IMAGE.FREE,
+    model,
     width: hd ? 1024 : 512,
     height: hd ? 1024 : 512,
     numberResults: 1,
     outputFormat: 'JPG',
     includeCost: true,
   };
+
+  if (referenceImageUrl) {
+    // FLUX Redux's referenceImages array is the documented way to condition
+    // on a reference image. Unlike seedImage (which is generic img2img that
+    // may barely follow the reference), FLUX Redux is trained specifically to
+    // preserve identity/reference. Runware docs confirm the field name is
+    // `referenceImages` and it belongs on the imageInference task.
+    task.referenceImages = [{ url: referenceImageUrl, type: 'reference' }];
+  }
+
   const startedAt = Date.now();
   const { data, status } = await callRunwareTasks([task]);
   const latencyMs = Date.now() - startedAt;
@@ -117,9 +139,9 @@ async function generateImage(prompt, { hd, premium }) {
   };
 }
 
-function buildVideoTask(prompt, { hd, premium }) {
+function buildVideoTask(prompt, { hd, premium, referenceImageUrl }) {
   const useHdModel = hd || premium;
-  return {
+  const task = {
     taskType: 'videoInference',
     taskUUID: crypto.randomUUID(),
     positivePrompt: prompt,
@@ -136,6 +158,18 @@ function buildVideoTask(prompt, { hd, premium }) {
     deliveryMethod: 'async',
     includeCost: true,
   };
+
+  // seedImage/strength for image-to-video, same mechanism the image route
+  // uses (see generateImage above) -- Runware's videoInference accepts a
+  // seedImage URL to animate a starting frame. Strength follows the same
+  // model-family split as images: FLUX-based models need > 0.8 to show any
+  // visible change, others are fine lower.
+  if (referenceImageUrl) {
+    task.seedImage = referenceImageUrl;
+    task.strength = task.model.startsWith('bfl:') ? 0.85 : 0.7;
+  }
+
+  return task;
 }
 
 // Returns { result, status } -- status is the HTTP status of the getResponse
@@ -155,8 +189,8 @@ async function pollForResult(taskUUID, { intervalMs = 3000, timeoutMs = 120000 }
   throw new Error('Video generation timed out. Please try again.');
 }
 
-async function generateVideo(prompt, { hd, premium }) {
-  const task = buildVideoTask(prompt, { hd, premium });
+async function generateVideo(prompt, { hd, premium, referenceImageUrl }) {
+  const task = buildVideoTask(prompt, { hd, premium, referenceImageUrl });
   const startedAt = Date.now();
   const { data: queuedData, status: submitStatus } = await callRunwareTasks([task]);
   const [queued] = queuedData;
@@ -208,7 +242,14 @@ async function ensureWatermarkLogoUploaded() {
 
 function watermarkLayers(logoPublicId, { logoWidth, fontSize, logoY, textY }) {
   return [
-    { overlay: { public_id: logoPublicId }, gravity: 'south_east', x: 16, y: logoY, width: logoWidth, opacity: 90 },
+    // Two-step chain, not one flat step: a single { overlay, width, ... }
+    // object only resizes and places the layer -- it never crops or masks
+    // it, so the logo keeps whatever shape its source PNG happens to have.
+    // Cropping it into an actual circle needs its own transformation step
+    // (square thumb crop + radius:max) before the layer_apply step that
+    // composites the now-circular result onto the base image.
+    { overlay: { public_id: logoPublicId }, width: logoWidth, height: logoWidth, crop: 'thumb', gravity: 'center', radius: 'max' },
+    { flags: 'layer_apply', gravity: 'south_east', x: 16, y: logoY, opacity: 90 },
     { overlay: { font_family: 'Arial', font_weight: 'bold', font_size: fontSize, text: 'Bascardo Ai Token' }, gravity: 'south_east', x: 16, y: textY, opacity: 90, color: 'white' },
   ];
 }
@@ -247,8 +288,8 @@ router.get('/quota', authenticateToken, async (req, res) => {
       success: true,
       data: {
         premium,
-        image: { limit: imageLimit, remaining: Math.max(0, imageLimit - imageUsed), hdCostTokens: IMAGE_HD_COST_TOKENS, watermarkFree: premium, period: 'month' },
-        video: { limit: videoLimit, remaining: Math.max(0, videoLimit - videoUsed), hdCostTokens: VIDEO_HD_COST_TOKENS, durationSeconds: VIDEO_FREE_DURATION_SECONDS, watermarkFree: premium, period: 'month' },
+        image: { limit: imageLimit, remaining: Math.max(0, imageLimit - imageUsed), hdCostCredits: IMAGE_HD_COST, watermarkFree: premium, period: 'month' },
+        video: { limit: videoLimit, remaining: Math.max(0, videoLimit - videoUsed), hdCostCredits: VIDEO_HD_COST, durationSeconds: VIDEO_FREE_DURATION_SECONDS, watermarkFree: premium, period: 'month' },
       },
     });
   } catch (err) {
@@ -257,14 +298,22 @@ router.get('/quota', authenticateToken, async (req, res) => {
   }
 });
 
-// POST /api/ai/runware/image  Body: { prompt: string, hd?: boolean }
+// POST /api/ai/runware/image  Body: { prompt: string, hd?: boolean, referenceImageUrl?: string }
 // Free (non-premium): watermarked. Premium or HD: watermark skipped, same
-// perk structure as video.
+// perk structure as video. referenceImageUrl must already be a public HTTPS
+// URL (the client uploads it via /api/upload/message-media first, same
+// Cloudinary pipeline chat attachments use) -- Runware's referenceImages
+// (FLUX Redux) / seedImage (generic img2img) both accept a URL directly,
+// no need to proxy the bytes through this server.
 router.post('/image', authenticateToken, async (req, res) => {
   const prompt = req.body?.prompt;
   const hd = !!req.body?.hd;
+  const referenceImageUrl = req.body?.referenceImageUrl || null;
   if (!prompt?.trim()) return res.status(400).json({ success: false, error: 'A prompt is required' });
   if (prompt.length > 1000) return res.status(400).json({ success: false, error: 'Prompt too long (max 1000 characters)' });
+  if (referenceImageUrl && !/^https:\/\//.test(referenceImageUrl)) {
+    return res.status(400).json({ success: false, error: 'referenceImageUrl must be a public HTTPS URL' });
+  }
   if (!RUNWARE_API_KEY) return res.status(500).json({ success: false, error: 'AI image generation is not configured' });
 
   const userId = req.user.id;
@@ -274,34 +323,28 @@ router.post('/image', authenticateToken, async (req, res) => {
     const premium = await isPremium(userId);
 
     if (hd) {
-      const { data: wallet } = await supabase.from('wallets').select('token_balance').eq('user_id', userId).single();
-      if ((wallet?.token_balance || 0) < IMAGE_HD_COST_TOKENS) {
-        return res.status(402).json({ success: false, error: `HD generation costs ${IMAGE_HD_COST_TOKENS} Bascardo Tokens. Top up your balance and try again.` });
+      if (!(await hasCredits(userId, IMAGE_HD_COST))) {
+        return res.status(402).json({ success: false, error: `HD generation costs ${formatCredits(IMAGE_HD_COST)} in credits. Buy credits in your Wallet and try again.` });
       }
     } else {
       const limit = premium ? IMAGE_PREMIUM_MONTHLY_LIMIT : IMAGE_FREE_MONTHLY_LIMIT;
       if ((await monthlyUsage(userId, 'image')) >= limit) {
-        return res.status(429).json({ success: false, error: `Free monthly limit of ${limit} images reached. Try HD (spends Bascardo Tokens) or wait for next month.` });
+        return res.status(429).json({ success: false, error: `Free monthly limit of ${limit} images reached. Try HD (uses credits) or wait for next month.` });
       }
     }
 
-    const { imageUrl: rawImageUrl, taskUUID, modelUsed, latencyMs, providerCost, providerHttpStatus } = await generateImage(prompt.trim(), { hd, premium });
+    const { imageUrl: rawImageUrl, taskUUID, modelUsed, latencyMs, providerCost, providerHttpStatus } = await generateImage(prompt.trim(), { hd, premium, referenceImageUrl });
     const skipWatermark = hd || premium;
     const imageUrl = skipWatermark ? rawImageUrl : await watermarkImage(rawImageUrl);
     let charged = false;
 
     if (hd) {
-      const { data: chargeRows, error: chargeError } = await userScopedClient(tokenFromRequest(req)).rpc('spend_tokens', {
-        p_amount: IMAGE_HD_COST_TOKENS,
-        p_description: 'Bascardo AI Content — HD image',
-      });
-      if (chargeError) throw chargeError;
-      charged = !!chargeRows?.[0]?.success;
+      charged = await chargeCredits(req, IMAGE_HD_COST, 'Bascardo AI Content — HD image');
     } else {
       await recordMonthlyUsage(userId, 'image');
     }
 
-    logGeneration({ userId, feature: 'image', model: modelUsed, provider: 'runware', requestId: taskUUID, inputPrompt: prompt.trim(), tier: hd ? 'hd' : (premium ? 'premium_free' : 'free'), costTokens: charged ? IMAGE_HD_COST_TOKENS : 0, success: true, outputUrl: imageUrl, latencyMs, providerCost, providerHttpStatus });
+    logGeneration({ userId, feature: 'image', model: modelUsed, provider: 'runware', requestId: taskUUID, inputPrompt: prompt.trim(), tier: hd ? 'hd' : (premium ? 'premium_free' : 'free'), costTokens: charged ? creditsToLogUnits(IMAGE_HD_COST) : 0, success: true, outputUrl: imageUrl, latencyMs, providerCost, providerHttpStatus });
     res.json({ success: true, data: { imageUrl, hd, charged, watermarked: !skipWatermark } });
   } catch (err) {
     console.error('Runware image generate error:', err);
@@ -312,16 +355,24 @@ router.post('/image', authenticateToken, async (req, res) => {
 
 // ── Video ───────────────────────────────────────────────────────────────
 
-// POST /api/ai/runware/video  Body: { prompt: string, hd?: boolean }
+// POST /api/ai/runware/video  Body: { prompt: string, hd?: boolean, referenceImageUrl?: string }
 // Free (non-premium): 5s, watermarked, counts against the monthly cap.
 // Premium: watermark removed automatically, regardless of hd. HD: no
-// watermark, higher-res, costs VIDEO_HD_COST_TOKENS Bascardo Tokens and
-// never touches the monthly cap either way.
+// watermark, higher-res, costs VIDEO_HD_COST in credits and
+// never touches the monthly cap either way. referenceImageUrl must already
+// be a public HTTPS URL (the client uploads it via /api/upload/message-media
+// first, same Cloudinary pipeline chat attachments use) -- Runware's
+// videoInference seedImage accepts a URL directly to animate a starting
+// frame, no need to proxy the bytes through this server.
 router.post('/video', authenticateToken, async (req, res) => {
   const prompt = req.body?.prompt;
   const hd = !!req.body?.hd;
+  const referenceImageUrl = req.body?.referenceImageUrl || null;
   if (!prompt?.trim()) return res.status(400).json({ success: false, error: 'A prompt is required' });
   if (prompt.length > 1000) return res.status(400).json({ success: false, error: 'Prompt too long (max 1000 characters)' });
+  if (referenceImageUrl && !/^https:\/\//.test(referenceImageUrl)) {
+    return res.status(400).json({ success: false, error: 'referenceImageUrl must be a public HTTPS URL' });
+  }
   if (!RUNWARE_API_KEY) return res.status(500).json({ success: false, error: 'AI video generation is not configured' });
 
   const userId = req.user.id;
@@ -331,34 +382,28 @@ router.post('/video', authenticateToken, async (req, res) => {
     const premium = await isPremium(userId);
 
     if (hd) {
-      const { data: wallet } = await supabase.from('wallets').select('token_balance').eq('user_id', userId).single();
-      if ((wallet?.token_balance || 0) < VIDEO_HD_COST_TOKENS) {
-        return res.status(402).json({ success: false, error: `HD video costs ${VIDEO_HD_COST_TOKENS} Bascardo Tokens. Top up your balance and try again.` });
+      if (!(await hasCredits(userId, VIDEO_HD_COST))) {
+        return res.status(402).json({ success: false, error: `HD video costs ${formatCredits(VIDEO_HD_COST)} in credits. Buy credits in your Wallet and try again.` });
       }
     } else {
       const limit = premium ? VIDEO_PREMIUM_MONTHLY_LIMIT : VIDEO_FREE_MONTHLY_LIMIT;
       if ((await monthlyUsage(userId, 'video')) >= limit) {
-        return res.status(429).json({ success: false, error: `Free monthly limit of ${limit} video${limit === 1 ? '' : 's'} reached. Try HD (spends Bascardo Tokens) or wait for next month.` });
+        return res.status(429).json({ success: false, error: `Free monthly limit of ${limit} video${limit === 1 ? '' : 's'} reached. Try HD (uses credits) or wait for next month.` });
       }
     }
 
-    const { videoUrl: rawVideoUrl, taskUUID, modelUsed, latencyMs, providerCost, providerHttpStatus } = await generateVideo(prompt.trim(), { hd, premium });
+    const { videoUrl: rawVideoUrl, taskUUID, modelUsed, latencyMs, providerCost, providerHttpStatus } = await generateVideo(prompt.trim(), { hd, premium, referenceImageUrl });
     const skipWatermark = hd || premium; // Premium's plan perk: no watermark even on the free monthly allowance
     const videoUrl = skipWatermark ? rawVideoUrl : await watermarkVideo(rawVideoUrl);
     let charged = false;
 
     if (hd) {
-      const { data: chargeRows, error: chargeError } = await userScopedClient(tokenFromRequest(req)).rpc('spend_tokens', {
-        p_amount: VIDEO_HD_COST_TOKENS,
-        p_description: 'Bascardo AI Content — HD video',
-      });
-      if (chargeError) throw chargeError;
-      charged = !!chargeRows?.[0]?.success;
+      charged = await chargeCredits(req, VIDEO_HD_COST, 'Bascardo AI Content — HD video');
     } else {
       await recordMonthlyUsage(userId, 'video');
     }
 
-    logGeneration({ userId, feature: 'video', model: modelUsed, provider: 'runware', requestId: taskUUID, inputPrompt: prompt.trim(), durationSeconds: VIDEO_FREE_DURATION_SECONDS, tier: hd ? 'hd' : (premium ? 'premium_free' : 'free'), costTokens: charged ? VIDEO_HD_COST_TOKENS : 0, success: true, outputUrl: videoUrl, latencyMs, providerCost, providerHttpStatus });
+    logGeneration({ userId, feature: 'video', model: modelUsed, provider: 'runware', requestId: taskUUID, inputPrompt: prompt.trim(), durationSeconds: VIDEO_FREE_DURATION_SECONDS, tier: hd ? 'hd' : (premium ? 'premium_free' : 'free'), costTokens: charged ? creditsToLogUnits(VIDEO_HD_COST) : 0, success: true, outputUrl: videoUrl, latencyMs, providerCost, providerHttpStatus });
     res.json({ success: true, data: { videoUrl, hd, charged, watermarked: !skipWatermark } });
   } catch (err) {
     console.error('Runware video generate error:', err);
