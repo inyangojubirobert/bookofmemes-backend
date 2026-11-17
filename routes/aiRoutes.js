@@ -4,9 +4,9 @@ import Anthropic from '@anthropic-ai/sdk';
 import { supabase } from '../config/db.js';
 import { ITEM_TYPES, CONTENT_TYPES, ALL_TYPES } from '../config/itemTypes.js';
 import { authenticateToken } from '../auth.js';
-import { getAiPlan } from '../utils/isPremium.js';
 import { CREDIT_PRICES, formatCredits, creditsToLogUnits, hasCredits, chargeCredits } from '../utils/credits.js';
-import { makeDailyCounter } from '../utils/dailyQuota.js';
+import { creditStatus, spendCredits, creditsView, outOfCreditsMessage } from '../utils/aiCredits.js';
+import { creditsFor } from '../config/aiPlans.js';
 import { logGeneration } from '../utils/aiGenerationLog.js';
 
 /*
@@ -46,29 +46,27 @@ const MAX_MESSAGE_LENGTH = 4000;
 // first so the key is req.user.id (verified via Supabase JWT), not a
 // client-supplied body field that could be spoofed to dodge the limit or
 // burn through another user's quota.
-const DAILY_QUOTA_WINDOW_MS = 24 * 60 * 60 * 1000;
-// Per-plan daily limits: config/aiPlans.js (researchPerDay).
-const dailyQuotaHits = new Map(); // userId -> [timestamps]
-
+// Each research request costs AI credits from the monthly pool
+// (config/aiPlans.js), spent only when the answer was delivered.
 async function dailyResearchQuota(req, res, next) {
   const userId = req.user?.id;
   if (!userId) return res.status(401).json({ error: 'Sign in required' });
-
-  const plan = await getAiPlan(userId);
-  const limit = plan.limits.researchPerDay;
-
-  const now = Date.now();
-  const hits = (dailyQuotaHits.get(userId) || []).filter((t) => now - t < DAILY_QUOTA_WINDOW_MS);
-  if (hits.length >= limit) {
-    return res.status(429).json({
-      error: plan.id === 'business'
-        ? 'Daily AI research limit reached. Try again tomorrow.'
-        : `${plan.name} plan limit of ${limit} AI research requests a day reached. Upgrade your plan for more.`,
+  try {
+    const status = await creditStatus(userId);
+    const cost = creditsFor(req.path === '/search' ? 'search' : 'research', { premium: status.plan.premiumModels });
+    if (status.remaining < cost) {
+      return res.status(429).json({
+        error: outOfCreditsMessage(status, cost, status.plan.id === 'business' ? ' They renew on the 1st.' : ' Upgrade your Bascardo AI plan for more.'),
+      });
+    }
+    res.on('finish', () => {
+      if (res.statusCode < 400) spendCredits(userId, cost).catch((e) => console.error('[ai credits] spend failed:', e.message));
     });
+    next();
+  } catch (err) {
+    console.error('[ai credits] research check failed:', err.message);
+    res.status(503).json({ error: 'AI is busy right now. Please try again.' });
   }
-  hits.push(now);
-  dailyQuotaHits.set(userId, hits);
-  next();
 }
 
 const SUPPORTED_LANGUAGES = [
@@ -147,18 +145,18 @@ router.get('/languages', (_req, res) => {
 // ── Bascardo AI Content: writing (captions, titles, short scripts) ───────
 // Distinct quota from /chat and /search's dailyResearchQuota above -- this is
 // the "Generate Bascardo AI Content" writing tab, not the general assistant.
-// Per-plan daily writing limits: config/aiPlans.js (writingPerDay).
-const WRITE_OVERAGE_COST = CREDIT_PRICES.writeOverage; // credits per generation once the daily free cap is used up
-const writeQuota = makeDailyCounter();
+// Paid from the monthly AI credit pool; once it is used up, each generation
+// costs WRITE_OVERAGE_COST in wallet credits.
+const WRITE_OVERAGE_COST = CREDIT_PRICES.writeOverage;
 
 const BASCARDO_WRITE_SYSTEM_PROMPT = `You write short-form content for Bascardo/Bookofmemes creators -- meme captions, story openers/synopses, video and podcast titles, one-liners, outlines. Match the requested format; if none is specified, infer the most likely one from the prompt (a caption request gets a caption, a "write a story about X" request gets a short punchy opening, etc). Keep it tight and native to the platform's voice -- witty, conversational, never corporate. Return ONLY the requested text, no preamble, no explanation, no quotes around it.`;
 
 // GET /api/ai/write/quota
 router.get('/write/quota', authenticateToken, async (req, res) => {
   try {
-    const plan = await getAiPlan(req.user.id);
-    const limit = plan.limits.writingPerDay;
-    res.json({ success: true, data: { limit, remaining: Math.max(0, limit - writeQuota.usedToday(req.user.id)), overageCostCredits: WRITE_OVERAGE_COST, premium: plan.premiumModels, plan: plan.id, planName: plan.name } });
+    const status = await creditStatus(req.user.id);
+    const view = creditsView(status, 'writing');
+    res.json({ success: true, data: { ...view, limit: Math.floor(status.limit / view.creditCost), overageCostCredits: WRITE_OVERAGE_COST } });
   } catch (err) {
     console.error('Write quota error:', err);
     res.status(500).json({ success: false, error: 'Failed to load quota' });
@@ -176,16 +174,16 @@ router.post('/write', authenticateToken, async (req, res) => {
   const userId = req.user.id;
 
   try {
-const plan = await getAiPlan(userId);
-    const premium = plan.premiumModels;
-    const limit = plan.limits.writingPerDay;
-    const overFreeCap = writeQuota.usedToday(userId) >= limit;
+const status = await creditStatus(userId);
+    const premium = status.plan.premiumModels;
+    const cost = creditsFor('writing', { premium });
+    const overFreeCap = status.remaining < cost;
 
     if (overFreeCap) {
       if (!(await hasCredits(userId, WRITE_OVERAGE_COST))) {
         return res.status(429).json({
           success: false,
-          error: `Free daily limit of ${limit} reached. Extra generations cost ${formatCredits(WRITE_OVERAGE_COST)} in credits -- buy credits in your Wallet to continue.`,
+          error: `${outOfCreditsMessage(status, cost)} Extra generations cost ${formatCredits(WRITE_OVERAGE_COST)} in wallet credits -- buy credits in your Wallet to continue.`,
         });
       }
     }
@@ -203,7 +201,7 @@ const plan = await getAiPlan(userId);
     if (overFreeCap) {
       charged = await chargeCredits(req, WRITE_OVERAGE_COST, 'Bascardo AI Content — writing (overage)');
     } else {
-      writeQuota.record(userId);
+      await spendCredits(userId, cost);
     }
 
     logGeneration({ userId, feature: 'text', model: 'claude-haiku-4-5-20251001', provider: 'anthropic', requestId: message.id, inputPrompt: prompt.trim(), tier: overFreeCap ? 'hd' : (premium ? 'premium_free' : 'free'), costTokens: charged ? creditsToLogUnits(WRITE_OVERAGE_COST) : 0, success: true, outputUrl: null });

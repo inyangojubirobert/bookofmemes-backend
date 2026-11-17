@@ -10,7 +10,10 @@ import { userScopedClient, tokenFromRequest } from './supabaseUserClient.js';
 export const CREDIT_PRICES = {
   writeOverage: 0.02,      // per AI writing request past the free daily cap
   imageHd: 0.15,           // per HD image
-  videoHd: 0.6,            // per HD video
+  // HD video uses Seedance 2.0: ~$0.80 for 5 s, up to ~$2 from a start image
+  // (Runware examples, 2026-11-17), and Google keeps up to 30% of credit sales.
+  videoHd: 1.5,            // per HD video
+  videoHdWithReference: 3.0, // per HD video animated from a start image
   voiceHdPerMinute: 0.1,   // per started minute of HD narration
   newTitle: 1.0,           // posting a new title (charged in the app, see AddContent.js)
 };

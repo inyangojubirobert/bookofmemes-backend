@@ -1,6 +1,7 @@
 -- 059: Bascardo AI plans as Google Play subscriptions (One Dream's model).
 --
--- Free / Pro ($9 a month) / Business ($20 a month). Each Play purchase token is
+-- Free / Pro ($9 a month) / Business ($20 a month), each a monthly pool of AI
+-- credits (25 / 200 / 750, see Backend/config/aiPlans.js). Each Play purchase token is
 -- one subscription row; the user's plan is the best valid row. Raw purchase
 -- tokens are never stored, only their sha256 (provider_reference).
 --
@@ -123,6 +124,23 @@ GRANT EXECUTE ON FUNCTION public.get_ai_plan(uuid) TO service_role;
 GRANT EXECUTE ON FUNCTION public.sync_play_subscription(jsonb) TO service_role;
 REVOKE ALL ON FUNCTION public.my_ai_plan() FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.my_ai_plan() TO authenticated, service_role;
+
+-- The monthly AI credit pool is counted in ai_usage_monthly (feature
+-- 'ai_credits', unit 'credits'). Replace any older unit check with one that
+-- allows it.
+DO $$
+DECLARE r record;
+BEGIN
+  IF to_regclass('public.ai_usage_monthly') IS NOT NULL THEN
+    FOR r IN SELECT conname FROM pg_constraint
+              WHERE conrelid = 'public.ai_usage_monthly'::regclass AND contype = 'c'
+                AND pg_get_constraintdef(oid) ILIKE '%unit%' LOOP
+      EXECUTE format('ALTER TABLE public.ai_usage_monthly DROP CONSTRAINT %I', r.conname);
+    END LOOP;
+    ALTER TABLE public.ai_usage_monthly ADD CONSTRAINT ai_usage_monthly_unit_check
+      CHECK (unit IN ('generations', 'seconds', 'credits')) NOT VALID;
+  END IF;
+END $$;
 
 -- Stop selling the old credits Premium (existing ones run out normally).
 DO $$

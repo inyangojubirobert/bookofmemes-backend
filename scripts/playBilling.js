@@ -143,11 +143,10 @@ function explain(err) {
           listings: [{
             languageCode: 'en-US',
             title: `Bascardo AI ${plan.name}`,
-            description: `Bascardo AI ${plan.name} for Book of Memes: more AI research, writing, images, video and narration every month.`,
+            description: `Bascardo AI ${plan.name} for Book of Memes: ${plan.monthlyCredits} AI credits every month for research, writing, images, video and narration, with premium models and no watermark.`,
             benefits: [
-              `${plan.limits.imagesPerMonth} AI images a month`,
-              `${plan.limits.videosPerMonth} AI videos a month`,
-              `${Math.round(plan.limits.narrationSecondsPerMonth / 60)} min narration a month`,
+              `${plan.monthlyCredits} AI credits every month`,
+              'Research, writing, images, video and narration',
               'No watermark, premium models',
             ],
           }],

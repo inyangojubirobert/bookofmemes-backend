@@ -2,9 +2,9 @@ import express from 'express';
 import crypto from 'crypto';
 import { supabase } from '../config/db.js';
 import { authenticateToken } from '../auth.js';
-import { getAiPlan } from '../utils/isPremium.js';
 import { CREDIT_PRICES, formatCredits, creditsToLogUnits, hasCredits, chargeCredits } from '../utils/credits.js';
-import { monthlyUsage, recordMonthlyUsage } from '../utils/monthlyQuota.js';
+import { creditStatus, spendCredits, creditsView, outOfCreditsMessage } from '../utils/aiCredits.js';
+import { creditsFor } from '../config/aiPlans.js';
 import { logGeneration } from '../utils/aiGenerationLog.js';
 import { AI_MODELS, AI_VOICE_PRESETS } from '../config/aiModels.js';
 
@@ -103,18 +103,19 @@ async function synthesizeSpeech(text, { useHdModel }) {
 router.get('/quota', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.id;
-const plan = await getAiPlan(userId);
-    const premium = plan.premiumModels;
-    const limitSeconds = plan.limits.narrationSecondsPerMonth;
-    const usedSeconds = await monthlyUsage(userId, 'voice');
+const status = await creditStatus(userId);
+    const premium = status.plan.premiumModels;
+    const view = creditsView(status, 'narration', { seconds: 60 });
     res.json({
       success: true,
       data: {
         premium,
-        plan: plan.id,
-        planName: plan.name,
-        limitSeconds,
-        remainingSeconds: Math.max(0, limitSeconds - usedSeconds),
+        plan: status.plan.id,
+        planName: status.plan.name,
+        credits: view.credits,
+        creditCostPerMinute: view.creditCost,
+        limitSeconds: Math.floor(status.limit / view.creditCost) * 60,
+        remainingSeconds: view.remaining * 60,
         hdCostCreditsPerMinute: HD_COST_PER_MINUTE,
         maxCharsPerRequest: MAX_CHARS_PER_REQUEST,
         configured: !!RUNWARE_API_KEY,
@@ -150,8 +151,9 @@ router.post('/narrate', authenticateToken, async (req, res) => {
   const genStartedAt = Date.now(); // fallback latency source if synthesizeSpeech() itself is never reached
 
   try {
-const plan = await getAiPlan(userId);
-    const premium = plan.premiumModels;
+const status = await creditStatus(userId);
+    const premium = status.plan.premiumModels;
+    const creditCost = creditsFor('narration', { premium, seconds });
     let cost = 0;
     if (hd) {
       cost = Math.round(Math.ceil(seconds / 60) * HD_COST_PER_MINUTE * 100) / 100;
@@ -159,12 +161,10 @@ const plan = await getAiPlan(userId);
         return res.status(402).json({ success: false, error: `This would cost ${formatCredits(cost)} in credits. Buy credits in your Wallet and try again.` });
       }
     } else {
-      const limitSeconds = plan.limits.narrationSecondsPerMonth;
-      const usedSeconds = await monthlyUsage(userId, 'voice');
-      if (usedSeconds + seconds > limitSeconds) {
+      if (status.remaining < creditCost) {
         return res.status(429).json({
           success: false,
-          error: `This would use more than your remaining free narration time this month (${Math.max(0, limitSeconds - usedSeconds)}s left). Try HD (uses credits) or shorten the text.`,
+          error: outOfCreditsMessage(status, creditCost, ' Try HD (paid with wallet credits) or shorten the text.'),
         });
       }
     }
@@ -176,7 +176,7 @@ const plan = await getAiPlan(userId);
     if (hd) {
       charged = await chargeCredits(req, cost, 'Bascardo AI Content — HD narration');
     } else {
-      await recordMonthlyUsage(userId, 'voice', seconds, 'seconds');
+      await spendCredits(userId, creditCost);
     }
 
     logGeneration({ userId, feature: 'voice', model: modelUsed, provider: 'runware', requestId: taskUUID, durationSeconds: seconds, inputPrompt: text.trim(), tier: hd ? 'hd' : (premium ? 'premium_free' : 'free'), costTokens: charged ? creditsToLogUnits(cost) : 0, success: true, outputUrl: audioUrl, latencyMs, providerCost, providerHttpStatus });

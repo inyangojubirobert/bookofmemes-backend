@@ -3,9 +3,9 @@ import crypto from 'crypto';
 import { v2 as cloudinary } from 'cloudinary';
 import { supabase } from '../config/db.js';
 import { authenticateToken } from '../auth.js';
-import { getAiPlan } from '../utils/isPremium.js';
 import { CREDIT_PRICES, formatCredits, creditsToLogUnits, hasCredits, chargeCredits } from '../utils/credits.js';
-import { monthlyUsage, recordMonthlyUsage } from '../utils/monthlyQuota.js';
+import { creditStatus, spendCredits, creditsView, outOfCreditsMessage } from '../utils/aiCredits.js';
+import { creditsFor } from '../config/aiPlans.js';
 import { logGeneration } from '../utils/aiGenerationLog.js';
 import { AI_MODELS } from '../config/aiModels.js';
 
@@ -65,6 +65,7 @@ const IMAGE_HD_COST = CREDIT_PRICES.imageHd;
 
 const VIDEO_FREE_DURATION_SECONDS = 5;
 const VIDEO_HD_COST = CREDIT_PRICES.videoHd; // video runs far more than images provider-side -- priced accordingly
+const VIDEO_HD_REFERENCE_COST = CREDIT_PRICES.videoHdWithReference;
 
 // Returns { data, status } -- status is the raw HTTP status Runware
 // responded with, carried through so callers can log it even on success (not
@@ -277,19 +278,19 @@ async function watermarkImage(remoteImageUrl) {
 router.get('/quota', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.id;
-const plan = await getAiPlan(userId);
-    const premium = plan.premiumModels;
-    const imageLimit = plan.limits.imagesPerMonth;
-    const videoLimit = plan.limits.videosPerMonth;
-    const [imageUsed, videoUsed] = await Promise.all([monthlyUsage(userId, 'image'), monthlyUsage(userId, 'video')]);
+const status = await creditStatus(userId);
+    const premium = status.plan.premiumModels;
+    const image = creditsView(status, 'image');
+    const video = creditsView(status, 'video');
     res.json({
       success: true,
       data: {
         premium,
-        plan: plan.id,
-        planName: plan.name,
-        image: { limit: imageLimit, remaining: Math.max(0, imageLimit - imageUsed), hdCostCredits: IMAGE_HD_COST, watermarkFree: premium, period: 'month' },
-        video: { limit: videoLimit, remaining: Math.max(0, videoLimit - videoUsed), hdCostCredits: VIDEO_HD_COST, durationSeconds: VIDEO_FREE_DURATION_SECONDS, watermarkFree: premium, period: 'month' },
+        plan: status.plan.id,
+        planName: status.plan.name,
+        credits: image.credits,
+        image: { limit: Math.floor(status.limit / image.creditCost), remaining: image.remaining, creditCost: image.creditCost, creditCostWithReference: creditsFor('image', { premium, reference: true }), hdCostCredits: IMAGE_HD_COST, watermarkFree: premium, period: 'month' },
+        video: { limit: Math.floor(status.limit / video.creditCost), remaining: video.remaining, creditCost: video.creditCost, creditCostWithReference: creditsFor('video', { premium, reference: true }), hdCostCredits: VIDEO_HD_COST, hdCostCreditsWithReference: VIDEO_HD_REFERENCE_COST, durationSeconds: VIDEO_FREE_DURATION_SECONDS, watermarkFree: premium, period: 'month' },
       },
     });
   } catch (err) {
@@ -320,17 +321,17 @@ router.post('/image', authenticateToken, async (req, res) => {
   const genStartedAt = Date.now(); // fallback latency source if generateImage() itself is never reached
 
   try {
-const plan = await getAiPlan(userId);
-    const premium = plan.premiumModels;
+const status = await creditStatus(userId);
+    const premium = status.plan.premiumModels;
+    const cost = creditsFor('image', { premium, reference: !!referenceImageUrl });
 
     if (hd) {
       if (!(await hasCredits(userId, IMAGE_HD_COST))) {
         return res.status(402).json({ success: false, error: `HD generation costs ${formatCredits(IMAGE_HD_COST)} in credits. Buy credits in your Wallet and try again.` });
       }
     } else {
-      const limit = plan.limits.imagesPerMonth;
-      if ((await monthlyUsage(userId, 'image')) >= limit) {
-        return res.status(429).json({ success: false, error: `Free monthly limit of ${limit} images reached. Try HD (uses credits) or wait for next month.` });
+      if (status.remaining < cost) {
+        return res.status(429).json({ success: false, error: outOfCreditsMessage(status, cost, ' Try HD (paid with wallet credits) or wait for next month.') });
       }
     }
 
@@ -342,7 +343,7 @@ const plan = await getAiPlan(userId);
     if (hd) {
       charged = await chargeCredits(req, IMAGE_HD_COST, 'Bascardo AI Content — HD image');
     } else {
-      await recordMonthlyUsage(userId, 'image');
+      await spendCredits(userId, cost);
     }
 
     logGeneration({ userId, feature: 'image', model: modelUsed, provider: 'runware', requestId: taskUUID, inputPrompt: prompt.trim(), tier: hd ? 'hd' : (premium ? 'premium_free' : 'free'), costTokens: charged ? creditsToLogUnits(IMAGE_HD_COST) : 0, success: true, outputUrl: imageUrl, latencyMs, providerCost, providerHttpStatus });
@@ -380,17 +381,18 @@ router.post('/video', authenticateToken, async (req, res) => {
   const genStartedAt = Date.now(); // fallback latency source if generateVideo() itself is never reached
 
   try {
-const plan = await getAiPlan(userId);
-    const premium = plan.premiumModels;
+const status = await creditStatus(userId);
+    const premium = status.plan.premiumModels;
+    const cost = creditsFor('video', { premium, reference: !!referenceImageUrl });
+    const hdCost = referenceImageUrl ? VIDEO_HD_REFERENCE_COST : VIDEO_HD_COST;
 
     if (hd) {
-      if (!(await hasCredits(userId, VIDEO_HD_COST))) {
-        return res.status(402).json({ success: false, error: `HD video costs ${formatCredits(VIDEO_HD_COST)} in credits. Buy credits in your Wallet and try again.` });
+      if (!(await hasCredits(userId, hdCost))) {
+        return res.status(402).json({ success: false, error: `HD video costs ${formatCredits(hdCost)} in credits. Buy credits in your Wallet and try again.` });
       }
     } else {
-      const limit = plan.limits.videosPerMonth;
-      if ((await monthlyUsage(userId, 'video')) >= limit) {
-        return res.status(429).json({ success: false, error: `Free monthly limit of ${limit} video${limit === 1 ? '' : 's'} reached. Try HD (uses credits) or wait for next month.` });
+      if (status.remaining < cost) {
+        return res.status(429).json({ success: false, error: outOfCreditsMessage(status, cost, ' Try HD (paid with wallet credits) or wait for next month.') });
       }
     }
 
@@ -400,12 +402,12 @@ const plan = await getAiPlan(userId);
     let charged = false;
 
     if (hd) {
-      charged = await chargeCredits(req, VIDEO_HD_COST, 'Bascardo AI Content — HD video');
+      charged = await chargeCredits(req, hdCost, 'Bascardo AI Content — HD video');
     } else {
-      await recordMonthlyUsage(userId, 'video');
+      await spendCredits(userId, cost);
     }
 
-    logGeneration({ userId, feature: 'video', model: modelUsed, provider: 'runware', requestId: taskUUID, inputPrompt: prompt.trim(), durationSeconds: VIDEO_FREE_DURATION_SECONDS, tier: hd ? 'hd' : (premium ? 'premium_free' : 'free'), costTokens: charged ? creditsToLogUnits(VIDEO_HD_COST) : 0, success: true, outputUrl: videoUrl, latencyMs, providerCost, providerHttpStatus });
+    logGeneration({ userId, feature: 'video', model: modelUsed, provider: 'runware', requestId: taskUUID, inputPrompt: prompt.trim(), durationSeconds: VIDEO_FREE_DURATION_SECONDS, tier: hd ? 'hd' : (premium ? 'premium_free' : 'free'), costTokens: charged ? creditsToLogUnits(hdCost) : 0, success: true, outputUrl: videoUrl, latencyMs, providerCost, providerHttpStatus });
     res.json({ success: true, data: { videoUrl, hd, charged, watermarked: !skipWatermark } });
   } catch (err) {
     console.error('Runware video generate error:', err);
