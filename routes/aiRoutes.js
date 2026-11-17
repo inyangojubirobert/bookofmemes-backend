@@ -6,7 +6,9 @@ import { ITEM_TYPES, CONTENT_TYPES, ALL_TYPES } from '../config/itemTypes.js';
 import { authenticateToken } from '../auth.js';
 import { CREDIT_PRICES, formatCredits, creditsToLogUnits, hasCredits, chargeCredits } from '../utils/credits.js';
 import { creditStatus, spendCredits, creditsView, outOfCreditsMessage } from '../utils/aiCredits.js';
-import { creditsFor } from '../config/aiPlans.js';
+import { creditsFor, AI_PLANS } from '../config/aiPlans.js';
+import { getAiPlan } from '../utils/isPremium.js';
+import { makeDailyCounter } from '../utils/dailyQuota.js';
 import { logGeneration } from '../utils/aiGenerationLog.js';
 
 /*
@@ -27,7 +29,7 @@ const RATE_LIMIT_MAX = 30; // requests per window per caller
 const rateLimitHits = new Map(); // key -> [timestamps]
 
 function rateLimit(req, res, next) {
-  const key = req.body?.userId || req.ip;
+  const key = req.user?.id || req.ip;
   const now = Date.now();
   const hits = (rateLimitHits.get(key) || []).filter((t) => now - t < RATE_LIMIT_WINDOW_MS);
   if (hits.length >= RATE_LIMIT_MAX) {
@@ -39,6 +41,22 @@ function rateLimit(req, res, next) {
 }
 
 const MAX_MESSAGE_LENGTH = 4000;
+
+// Cost caps (config/aiPlans.js ACTION_COST_USD is worked out from these):
+// like One Dream, a chat answer is at most 650 tokens and only the last few
+// messages (each cut to 1,000 characters) go back to the model.
+const CHAT_MAX_TOKENS = 650;
+const SEARCH_MAX_TOKENS = 1300;
+const HISTORY_MESSAGES = 8;
+const HISTORY_CHARS = 1000;
+const CORRECT_MAX_CHARS = 500;
+const recentHistory = (history) => (Array.isArray(history) ? history : []).slice(-HISTORY_MESSAGES)
+  .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+  .map((m) => ({ role: m.role, content: m.content.slice(0, HISTORY_CHARS) }));
+
+// Automatic spelling/grammar correction while typing a chat message: a Pro /
+// Business perk with a daily cap (each check is a small Claude call).
+const correctionsToday = makeDailyCounter();
 
 // Daily, subscription-aware quota for the research features (/chat, /search)
 // -- these are the open-ended "research anything" endpoints, the ones with
@@ -53,7 +71,8 @@ async function dailyResearchQuota(req, res, next) {
   if (!userId) return res.status(401).json({ error: 'Sign in required' });
   try {
     const status = await creditStatus(userId);
-    const cost = creditsFor(req.path === '/search' ? 'search' : 'research', { premium: status.plan.premiumModels });
+    const action = { '/search': 'search', '/translate': 'translate' }[req.path] || 'research';
+    const cost = creditsFor(action, { premium: status.plan.premiumModels });
     if (status.remaining < cost) {
       return res.status(429).json({
         error: outOfCreditsMessage(status, cost, status.plan.id === 'business' ? ' They renew on the 1st.' : ' Upgrade your Bascardo AI plan for more.'),
@@ -78,17 +97,23 @@ const SUPPORTED_LANGUAGES = [
 // POST /api/ai/correct
 // Body: { text: string }
 // Returns: { corrected: string, changed: boolean }
-router.post('/correct', rateLimit, async (req, res) => {
+router.post('/correct', authenticateToken, rateLimit, async (req, res) => {
   const { text } = req.body;
+  const userId = req.user.id;
+  const plan = await getAiPlan(userId);
+  const perDay = plan.correctionsPerDay || 0;
+  if (!perDay) return res.status(403).json({ error: 'Automatic correction is part of Bascardo AI Pro and Business.', code: 'upgrade_required' });
+  if (correctionsToday.usedToday(userId) >= perDay) return res.status(429).json({ error: 'Daily correction limit reached.', code: 'daily_limit' });
   if (!text || text.trim().length < 5) {
     return res.status(400).json({ error: 'Text too short' });
   }
-  if (text.length > MAX_MESSAGE_LENGTH) return res.status(400).json({ error: `Text too long (max ${MAX_MESSAGE_LENGTH} characters)` });
+  if (text.length > CORRECT_MAX_CHARS) return res.json({ corrected: text, changed: false });
 
   try {
+    correctionsToday.record(userId);
     const message = await anthropic.messages.create({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: 512,
+      max_tokens: 200,
       messages: [
         {
           role: 'user',
@@ -108,7 +133,7 @@ router.post('/correct', rateLimit, async (req, res) => {
 // POST /api/ai/translate
 // Body: { text: string, targetLanguage: string, sourceLanguage?: string }
 // Returns: { translated: string, detectedLanguage?: string }
-router.post('/translate', rateLimit, async (req, res) => {
+router.post('/translate', authenticateToken, rateLimit, dailyResearchQuota, async (req, res) => {
   const { text, targetLanguage, sourceLanguage } = req.body;
   if (!text || !targetLanguage) {
     return res.status(400).json({ error: 'text and targetLanguage required' });
@@ -190,7 +215,7 @@ const status = await creditStatus(userId);
 
     const message = await anthropic.messages.create({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: 1024,
+      max_tokens: CHAT_MAX_TOKENS,
       system: BASCARDO_WRITE_SYSTEM_PROMPT,
       messages: [{ role: 'user', content: prompt.trim() }],
     });
@@ -224,15 +249,15 @@ router.post('/chat', authenticateToken, dailyResearchQuota, async (req, res) => 
   if (message.length > MAX_MESSAGE_LENGTH) return res.status(400).json({ error: `Message too long (max ${MAX_MESSAGE_LENGTH} characters)` });
 
   // Keep last 20 exchanges to control token cost
-  const trimmedHistory = history.slice(-20);
+  const trimmedHistory = recentHistory(history);
 
   try {
     const response = await anthropic.messages.create({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: 1024,
+      max_tokens: CHAT_MAX_TOKENS,
       system: AI_SYSTEM_PROMPT,
       messages: [
-        ...trimmedHistory.map(m => ({ role: m.role, content: m.content })),
+        ...trimmedHistory,
         { role: 'user', content: message.trim() },
       ],
     });
@@ -331,7 +356,7 @@ router.post('/search', authenticateToken, dailyResearchQuota, async (req, res) =
   if (!message?.trim()) return res.status(400).json({ error: 'message is required' });
   if (message.length > MAX_MESSAGE_LENGTH) return res.status(400).json({ error: `Message too long (max ${MAX_MESSAGE_LENGTH} characters)` });
 
-  const trimmedHistory = history.slice(-20);
+  const trimmedHistory = recentHistory(history);
 
   try {
     const [matches, ownContent] = await Promise.all([
@@ -349,10 +374,10 @@ router.post('/search', authenticateToken, dailyResearchQuota, async (req, res) =
 
     const response = await anthropic.messages.create({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: 2048,
+      max_tokens: SEARCH_MAX_TOKENS,
       system: BASCARDO_SEARCH_SYSTEM_PROMPT,
       messages: [
-        ...trimmedHistory.map((m) => ({ role: m.role, content: m.content })),
+        ...trimmedHistory,
         { role: 'user', content: `${blocks.join('\n\n')}\n\nUser question: ${message.trim()}` },
       ],
     });

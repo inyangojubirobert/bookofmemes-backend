@@ -6,20 +6,25 @@
 //   Pro      200 credits a month     $9   (Google keeps 15%: we receive $7.65)
 //   Business 750 credits a month     $20  (we receive $17.00)
 //
-// Pro and Business match One Dream's credits and prices. One credit is worth
-// about what One Dream's is (one AI chat): it must never cost us more than
-// $0.01. So a subscriber who spends every credit on the most expensive thing
-// costs at most $2 (Pro) or $7.50 (Business), and what is left of their
-// payment carries the free users, whose AI is paid for by subscribers.
-// Free is sized for that: at most $0.10 a month per free user, so one Pro
-// subscriber covers ~50 free users even if everybody uses everything.
-// Run `node scripts/aiPlanEconomics.js` after changing anything here. Provider prices checked 2026-11-17 (see ACTION_COSTS); the real
-// cost of every generation is logged in ai_generation_history.provider_cost,
-// so re-check these when that data builds up.
+// A credit is worth exactly what One Dream's is: one AI chat on Claude Haiku
+// with a short answer (≤650 tokens) and a short history, at most ~$0.0065.
+// Anything costlier (search, images, video, narration) costs proportionally
+// more credits, so a Pro or Business subscriber costs us no more than a One
+// Dream subscriber with the same plan: at most $1.30 / $4.88 a month even if
+// every credit is spent on the most expensive thing.
 //
-// When the month's credits run out, writing, images, video and narration can
-// still be bought one at a time with wallet credits (HD, utils/credits.js).
-export const CREDIT_COST_CEILING_USD = 0.01;
+// Most users will stay on Free and their AI is paid for by subscribers, so
+// Free is a taste, not a workload: 10 credits (≤ $0.065 a month), no video,
+// no automatic correction. Run `node scripts/aiPlanEconomics.js` after
+// changing anything here; it fails if any plan stops paying for itself and
+// its free users.
+//
+// Provider prices checked 2026-11-17 (ACTION_COST_USD). The real cost of
+// every generation is logged in ai_generation_history.provider_cost; compare
+// after a month live. When the month's credits run out, writing, images,
+// video and narration can still be bought one at a time with wallet credits
+// (HD, utils/credits.js).
+export const CREDIT_COST_CEILING_USD = 0.0065;
 
 export const AI_PLANS = {
   free: {
@@ -27,6 +32,7 @@ export const AI_PLANS = {
     name: 'Free',
     priceUsd: 0,
     monthlyCredits: 10,
+    correctionsPerDay: 0,  // automatic spelling/grammar fixes while typing a chat message
     googlePlayProductId: null,
     premiumModels: false, // fast models, watermarked
   },
@@ -35,6 +41,7 @@ export const AI_PLANS = {
     name: 'Pro',
     priceUsd: 9,
     monthlyCredits: 200,
+    correctionsPerDay: 20,
     googlePlayProductId: process.env.GOOGLE_PLAY_AI_PRO_PRODUCT_ID || 'bom_ai_pro_monthly',
     premiumModels: true, // flagship models, no watermark
   },
@@ -43,40 +50,44 @@ export const AI_PLANS = {
     name: 'Business',
     priceUsd: 20,
     monthlyCredits: 750,
+    correctionsPerDay: 40,
     googlePlayProductId: process.env.GOOGLE_PLAY_AI_BUSINESS_PRODUCT_ID || 'bom_ai_business_monthly',
     premiumModels: true,
   },
 };
 
 // Credits per action. "fast" = the Free plan's models, "premium" = Pro and
-// Business models. Our cost per action, in USD:
-//   chat / writing       Claude Haiku 4.5, ≤1k output tokens        ≤ $0.008
-//   search               Claude Haiku 4.5, ≤2k output tokens        ≤ $0.014
-//   image fast           Runware z-image turbo (measured)              $0.0006
-//   image premium        FLUX.2 [pro]: $0.045, with a reference $0.075
-//   video fast           Seedance 2.0 fast, 5 s (measured)             $0.30
-//   video premium        Seedance 2.0, 5 s: ~$0.80 (Runware's 6 s example
-//                        is $0.95); from a start image up to ~$2 (examples)
-//   narration            Fish Audio S2.1 pro $15 / 1M bytes ≈ $0.02 a minute;
-//                        Gemini flash TTS less
+// Business models.
 export const ACTION_COSTS = {
-  research: { fast: 1, premium: 1 },         // AI chat
-  search: { fast: 2, premium: 2 },           // AI search over app content (longer answers)
-  writing: { fast: 1, premium: 1 },
-  image: { fast: 1, premium: 5, premiumWithReference: 8 },
-  video: { fast: 30, premium: 80, premiumWithReference: 200 },
-  narrationPerMinute: { fast: 1, premium: 2 },
+  research: { fast: 1, premium: 1 },          // AI chat (the unit: same as One Dream's chat)
+  translate: { fast: 1, premium: 1 },         // translate a chat message
+  writing: { fast: 1, premium: 1 },           // captions, titles, scripts
+  search: { fast: 2, premium: 2 },            // AI search over app content (longer answers)
+  image: { fast: 1, premium: 7, premiumWithReference: 12 },
+  video: { fast: 50, premium: 125, premiumWithReference: 310 },
+  narrationPerMinute: { fast: 1, premium: 4 },
 };
 
-// Our cost per action in USD (worst case), used by scripts/aiPlanEconomics.js.
+// Our worst-case cost per action in USD (Haiku 4.5: $1 / $5 per million input / output tokens):
+//   chat       ≤3.2k input (system, 8 messages × 1,000 chars, question) + 650 output  ≈ $0.0065
+//   translate  ≤1.1k input + 1,024 output                                              ≈ $0.0062
+//   writing    ≤1.2k input + 650 output                                                ≈ $0.0045
+//   search     ≤4.7k input (adds app content) + 1,300 output                           ≈ $0.0112
+//   image      fast: Runware z-image turbo (measured) $0.0006; premium FLUX.2 [pro] $0.045, from a reference $0.075
+//   video      fast: Seedance 2.0 fast 5 s (measured) $0.30; premium Seedance 2.0 5 s ~$0.80 (Runware's 6 s
+//              example is $0.95), from a start image up to ~$2 (Runware examples)
+//   narration  premium: Fish Audio S2.1 pro, $15 per 1M bytes ≈ $0.02 a minute; fast: Gemini flash TTS ≤ $0.005
+//   correction ≤500 characters in, 200 tokens out                                      ≈ $0.0011
 export const ACTION_COST_USD = {
-  research: { fast: 0.008, premium: 0.008 },   // Haiku 4.5, ≤1,024 output tokens + history
-  search: { fast: 0.014, premium: 0.014 },     // Haiku 4.5, ≤2,048 output tokens + app content
-  writing: { fast: 0.007, premium: 0.007 },
+  research: { fast: 0.0065, premium: 0.0065 },
+  translate: { fast: 0.0062, premium: 0.0062 },
+  writing: { fast: 0.0045, premium: 0.0045 },
+  search: { fast: 0.0112, premium: 0.0112 },
   image: { fast: 0.0006, premium: 0.045, premiumWithReference: 0.075 },
   video: { fast: 0.30, premium: 0.80, premiumWithReference: 2.0 },
   narrationPerMinute: { fast: 0.005, premium: 0.02 },
 };
+export const CORRECTION_COST_USD = 0.0011;
 
 export function creditsFor(action, { premium = false, reference = false, seconds = 0 } = {}) {
   const c = ACTION_COSTS[action === 'narration' ? 'narrationPerMinute' : action];
@@ -109,6 +120,6 @@ export function planExamples(p) {
 export const publicPlan = (p) => ({
   id: p.id, name: p.name, price_usd: p.priceUsd, monthly_credits: p.monthlyCredits,
   google_play_product_id: p.googlePlayProductId, base_plan_id: p.googlePlayProductId ? AI_BASE_PLAN_ID : null,
-  premium_models: p.premiumModels, examples: planExamples(p),
+  premium_models: p.premiumModels, corrections_per_day: p.correctionsPerDay, examples: planExamples(p),
   action_costs: Object.fromEntries(Object.entries(ACTION_COSTS).map(([k, v]) => [k, p.premiumModels ? v.premium : v.fast])),
 });
