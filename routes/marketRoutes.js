@@ -55,7 +55,17 @@ async function ngnRate() {
 // this bid / purchase. Uses the database's own quote (market_quote), so the
 // fee and any GBP/EUR/GHS conversion match exactly what place_cash_bid charges.
 // Returns { currency, amount, methods }.
+const TOPUP_MAX_USD = 2000;
 async function amountNeeded(userId, purpose) {
+  // A plain top-up of marketplace funds (Add funds): the amount asked for.
+  if (purpose.action === 'deposit') {
+    const s = await settings();
+    const rate = purpose.currency === 'USD' ? 1 : Number(await rpc('market_rate', { p_code: purpose.currency }));
+    const usd = purpose.amount / rate;
+    if (usd < Number(s.min_payment_usd)) throw userError(`The minimum top-up is ${purpose.currency === 'USD' ? '$' : '₦'}${(Number(s.min_payment_usd) * rate).toFixed(2)}`);
+    if (usd > TOPUP_MAX_USD) throw userError(`The most you can add at once is about $${TOPUP_MAX_USD}`);
+    return { currency: purpose.currency, amount: purpose.amount, methods: purpose.currency === 'NGN' ? ['paystack'] : ['paystack', 'usdt'] };
+  }
   const { data: l } = await supabase.from('marketplace_listings')
     .select('status, expires_at, seller_id, listing_type, buy_now_price, listing_currency').eq('id', purpose.listing_id).maybeSingle();
   if (!l) throw userError('Listing not found');
@@ -107,6 +117,12 @@ async function runPurpose(req, purpose) {
 
 function cleanPurpose(body) {
   const action = body?.action;
+  if (action === 'deposit') {
+    const currency = body?.currency === 'NGN' ? 'NGN' : 'USD';
+    const amount = round2(body?.amount);
+    if (!(amount > 0)) throw userError('Enter an amount');
+    return { action, currency, amount };
+  }
   if (action === 'bid') return { action, listing_id: String(body.listing_id), bid_amount: round2(body.bid_amount) };
   if (action === 'buy_now') return { action, listing_id: String(body.listing_id) };
   throw userError('Unknown action');

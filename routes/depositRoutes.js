@@ -9,13 +9,14 @@
 //         POST /cancel           { id }
 // Agent:  GET  /agent            deposits waiting for me (?status=submitted|paid|failed)
 //         POST /agent/review     { id, confirm, amount_received, note }
-// Admin:  GET/POST/PATCH /admin/links, GET/POST/PATCH /admin/agents
+// Admin:  GET /admin/tiers (ladder with each tier's link), GET/POST/PATCH /admin/links,
+//         GET/POST /admin/agents
 import express from 'express';
 import { supabase } from '../config/db.js';
 import { authenticateToken } from '../auth.js';
+import { DEPOSIT_TIERS, DEPOSIT_CURRENCIES } from '../config/depositTiers.js';
 
 const router = express.Router();
-export const DEPOSIT_CURRENCIES = ['USD', 'EUR', 'JPY', 'GBP', 'CNY', 'AUD', 'CAD', 'CHF', 'HKD', 'SGD'];
 const UUID = /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 
 function fail(res, err, fallback = 'Something went wrong') {
@@ -30,6 +31,10 @@ async function rpc(name, args) {
   return data;
 }
 const must = ({ data, error }) => { if (error) throw error; return data; };
+async function quote(currency, amount) {
+  try { return await rpc('market_link_deposit_quote', { p_currency: currency, p_amount: amount }); } catch { return null; }
+}
+const money2 = (n) => Math.round(Number(n) * 100) / 100;
 const id = (v) => { const s = String(v || ''); if (!UUID.test(s)) throw userError('Invalid id'); return s; };
 
 async function agentsById(ids) {
@@ -43,6 +48,8 @@ function depositView(p, link, agent) {
   return {
     id: p.id, code: p.deposit_code, status: p.status, provider: p.deposit_provider,
     pay_currency: p.pay_currency, pay_amount: Number(p.amount_due), credit_currency: p.credit_currency, credit_amount: Number(p.credit_amount),
+    fee_usd: p.deposit_fee === null || p.deposit_fee === undefined ? null : Number(p.deposit_fee),
+    spread_usd: p.deposit_spread === null || p.deposit_spread === undefined ? null : Number(p.deposit_spread),
     url: link?.url || null, instructions: link?.instructions || null,
     agent: agent || null, payer_name: p.payer_name, tx_ref: p.payer_tx_ref,
     note: p.review_note || p.provider_data?.note || (p.status === 'failed' ? p.provider_data?.reason : null) || null,
@@ -53,30 +60,30 @@ function depositView(p, link, agent) {
 // ── Buyer ───────────────────────────────────────────────────────────────────
 router.get('/options', authenticateToken, async (_req, res) => {
   try {
-    const [links, rates, s, agents] = await Promise.all([
+    const [links, s, agents] = await Promise.all([
       supabase.from('market_deposit_links').select('id, provider, pay_currency, pay_amount, instructions, sort_order').eq('is_active', true).order('sort_order').order('pay_amount'),
-      supabase.from('market_fx_rates').select('currency, units_per_usd, fetched_at'),
-      supabase.from('market_settings').select('link_deposit_spread_pct, fx_max_age_hours, link_deposit_daily_cap_usd').eq('id', true).single(),
+      supabase.from('market_settings').select('link_deposit_spread_pct, link_deposit_daily_cap_usd, link_deposit_fee_pct, link_deposit_fee_min_usd, link_deposit_max_package_usd').eq('id', true).single(),
       supabase.from('market_deposit_agents').select('user_id', { count: 'exact', head: true }).eq('is_active', true),
     ]);
     const settings = must(s);
-    const fresh = Date.now() - settings.fx_max_age_hours * 3600e3;
-    const rate = Object.fromEntries(must(rates).filter((r) => new Date(r.fetched_at).getTime() >= fresh).map((r) => [r.currency, Number(r.units_per_usd)]));
-    rate.USD = 1;
-    const packages = must(links).map((l) => {
-      const r = rate[l.pay_currency];
-      const spread = l.pay_currency === 'USD' ? 0 : Number(settings.link_deposit_spread_pct);
+    const packages = await Promise.all(must(links).map(async (l) => {
+      const q = await quote(l.pay_currency, Number(l.pay_amount));
       return {
         id: l.id, provider: l.provider, pay_currency: l.pay_currency, pay_amount: Number(l.pay_amount), instructions: l.instructions,
-        credit_usd: r ? Math.round(Number(l.pay_amount) / r * (1 - spread / 100) * 100) / 100 : null,
-        available: !!r,
+        gross_usd: q ? money2(q.gross_usd) : null,
+        spread_usd: q ? money2(q.spread_usd) : null,
+        fee_usd: q ? money2(q.fee_usd) : null,
+        credit_usd: q ? money2(q.credit_usd) : null,
+        available: !!q && !q.over_ceiling,
       };
-    });
+    }));
     res.json({
       success: true,
       data: {
         currencies: DEPOSIT_CURRENCIES.filter((c) => packages.some((p) => p.pay_currency === c)),
         packages, spread_pct: Number(settings.link_deposit_spread_pct), daily_cap_usd: Number(settings.link_deposit_daily_cap_usd),
+        fee_pct: Number(settings.link_deposit_fee_pct), fee_min_usd: Number(settings.link_deposit_fee_min_usd),
+        max_package_usd: Number(settings.link_deposit_max_package_usd),
         agents_available: (agents.count || 0) > 0,
       },
     });
@@ -167,6 +174,26 @@ async function requireAdmin(req, res, next) {
   } catch (err) { fail(res, err); }
 }
 
+router.get('/admin/tiers', authenticateToken, requireAdmin, async (_req, res) => {
+  try {
+    const links = must(await supabase.from('market_deposit_links').select('*').order('pay_amount'));
+    const data = await Promise.all(DEPOSIT_CURRENCIES.map(async (currency) => ({
+      currency,
+      tiers: await Promise.all(DEPOSIT_TIERS[currency].map(async (amount) => {
+        const q = await quote(currency, amount);
+        return {
+          amount,
+          credit_usd: q ? money2(q.credit_usd) : null,
+          over_ceiling: q ? !!q.over_ceiling : null,
+          links: links.filter((l) => l.pay_currency === currency && Number(l.pay_amount) === amount),
+        };
+      })),
+      other_links: links.filter((l) => l.pay_currency === currency && !DEPOSIT_TIERS[currency].includes(Number(l.pay_amount))),
+    })));
+    res.json({ success: true, data });
+  } catch (err) { fail(res, err); }
+});
+
 router.get('/admin/links', authenticateToken, requireAdmin, async (_req, res) => {
   try {
     res.json({ success: true, data: must(await supabase.from('market_deposit_links').select('*').order('pay_currency').order('pay_amount')) });
@@ -188,15 +215,26 @@ function linkFields(b, partial = false) {
   return f;
 }
 
+async function checkCeiling(f) {
+  if (f.pay_currency === undefined || f.pay_amount === undefined) return;
+  const q = await quote(f.pay_currency, f.pay_amount);
+  if (!q) throw userError(`No current ${f.pay_currency} exchange rate. Try again later.`);
+  if (q.over_ceiling) throw userError('This package is above the deposit ceiling. Use a smaller amount.');
+  if (!(Number(q.credit_usd) > 0)) throw userError('This package is too small to cover the deposit fee.');
+}
+
 router.post('/admin/links', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    res.status(201).json({ success: true, data: must(await supabase.from('market_deposit_links').insert(linkFields(req.body || {})).select('*').single()) });
+    const f = linkFields(req.body || {});
+    await checkCeiling(f);
+    res.status(201).json({ success: true, data: must(await supabase.from('market_deposit_links').insert(f).select('*').single()) });
   } catch (err) { fail(res, err); }
 });
 
 router.patch('/admin/links', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const f = { ...linkFields(req.body || {}, true), updated_at: new Date().toISOString() };
+    await checkCeiling(f);
     res.json({ success: true, data: must(await supabase.from('market_deposit_links').update(f).eq('id', id(req.body?.id)).select('*').single()) });
   } catch (err) { fail(res, err); }
 });
