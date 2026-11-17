@@ -399,6 +399,11 @@ async function refundFunds(w) {
       } catch (err) {
         manual.push(`Paystack refund for ${src.paystack_reference} failed (${err.message})`);
       }
+    } else if (src.method === 'wallet_link') {
+      // No API: the agent or admin sends it back through the wallet app by hand,
+      // in the currency it was paid in, at that deposit's own rate.
+      const back = src.pay_currency === 'USD' ? Number(src.amount) : Math.round(Number(src.amount) * Number(src.fx_mid_rate) * 100) / 100;
+      manual.push(`Send ${src.pay_currency} ${back.toFixed(2)} back through ${src.deposit_provider} to ${src.payer_name} (deposit ${src.deposit_code}, their transaction ${src.payer_tx_ref})`);
     } else {
       manual.push(`Send ${Number(src.amount)} USDT on ${src.usdt_network} back to ${src.usdt_sender}`);
     }
@@ -522,6 +527,9 @@ export async function runMarketReconciliation() {
       } catch (err) { console.error('[market] reconcile transfer', w.id, err.message); }
     }
   }
+
+  // Link deposits the buyer never finished.
+  await rpc('market_expire_link_deposits', {}).catch((e) => console.error('[market] expire link deposits', e.message));
 
   const ready = await rpc('accounts_ready_for_deletion', {});
   for (const { user_id: uid } of ready || []) {

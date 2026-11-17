@@ -20,6 +20,7 @@ import marketplaceRoutes, { startMarketplaceSweepTimer } from "./routes/marketpl
 import { startLeadershipGamesSweepTimer } from "./routes/leadershipGamesRoutes.js";
 import linkPreviewRoutes from "./routes/linkPreviewRoutes.js";
 import marketRoutes, { accountRouter, startMarketTimers } from "./routes/marketRoutes.js";
+import depositRoutes from "./routes/depositRoutes.js";
 import adsRoutes from "./routes/adsRoutes.js";
 import subscriptionRoutes from "./routes/subscriptionRoutes.js";
 
@@ -52,6 +53,7 @@ app.use("/api/billing", billingRoutes);
 // Marketplace (list/bid/buy-now/ownership for stories, memes, puzzles,
 // kids_collections, music_box, podcast_box, tv_box)
 app.use("/api/marketplace", marketplaceRoutes);
+app.use("/api/market/deposits", depositRoutes); // international deposits by wallet link, agent-confirmed (migration 060)
 app.use("/api/market", marketRoutes);      // real-money marketplace (migration 055)
 app.use("/api/account", accountRouter);    // account deletion
 app.use("/api/ads", adsRoutes);            // advertising, boosts and campaigns (migration 058)
