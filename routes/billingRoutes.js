@@ -9,6 +9,7 @@ import { createPlayAuthClient, isPlayAuthConfigured } from '../config/playAuth.j
 import { supabase } from '../config/db.js';
 import { authenticateToken } from '../auth.js';
 import { PLAY_CREDIT_PRODUCTS, PLAY_PRODUCT_BY_ID, PLAY_PACKAGE_NAME } from '../config/playProducts.js';
+import { revokeVoidedAdPurchase } from './adsRoutes.js';
 
 const router = express.Router();
 const API = 'https://androidpublisher.googleapis.com/androidpublisher/v3/applications';
@@ -98,6 +99,8 @@ export async function runVoidedPurchaseSweep() {
     if (token) qs.set('token', token);
     const page = await playRequest(`/purchases/voidedpurchases?${qs}`);
     for (const v of page.voidedPurchases || []) {
+      // Ad and boost packages: end the campaign bought with it.
+      await revokeVoidedAdPurchase(v.purchaseToken).catch((e) => console.error('[billing sweep] ad revoke failed:', e.message));
       const { data, error } = await supabase.rpc('reverse_play_purchase', { p_purchase_token: v.purchaseToken });
       if (error) console.error('[billing sweep] reverse failed:', error.message);
       else if (data?.success && !data.already_reversed) reversed += 1;

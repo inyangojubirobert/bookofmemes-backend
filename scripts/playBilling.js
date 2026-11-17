@@ -1,13 +1,14 @@
-// Checks (and optionally creates) the Google Play credit products.
+// Checks (and optionally creates) the Google Play products: credit packs plus
+// the ad and boost packages.
 //
 //   node --env-file=.env scripts/playBilling.js           check setup
 //   node --env-file=.env scripts/playBilling.js --create  also create missing products
 //
-// Run from Backend/. Prices are set to the credit amount in USD (credits_5 =
-// $5.00); Google converts them to local prices. Change them in Play Console
-// any time.
+// Run from Backend/. Credit packs are priced at their credit amount in USD
+// (credits_5 = $5.00); ad and boost packages at One Dream's exact prices
+// (PLAY_AD_PRODUCTS). Google converts them to local prices.
 import { createPlayAuthClient, loadPlayServiceAccount } from '../config/playAuth.js';
-import { PLAY_CREDIT_PRODUCTS, PLAY_PACKAGE_NAME } from '../config/playProducts.js';
+import { PLAY_CREDIT_PRODUCTS, PLAY_AD_PRODUCTS, PLAY_PACKAGE_NAME } from '../config/playProducts.js';
 
 const API = `https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${PLAY_PACKAGE_NAME}`;
 const create = process.argv.includes('--create');
@@ -55,7 +56,16 @@ function explain(err) {
   }
 
   let missing = 0;
-  for (const { productId, credits } of PLAY_CREDIT_PRODUCTS) {
+  const ALL_PRODUCTS = [
+    ...PLAY_CREDIT_PRODUCTS.map(({ productId, credits }) => ({
+      productId,
+      price: credits,
+      title: `$${credits} in credits`,
+      description: `$${credits} in Book of Memes credits for listing fees, boosts, ads, premium and AI tools.`,
+    })),
+    ...PLAY_AD_PRODUCTS,
+  ];
+  for (const { productId, price, title, description } of ALL_PRODUCTS) {
     const p = existing[productId];
     if (p) {
       console.log(`  ✔ ${productId}  ${p.status}  ${p.defaultPrice ? (Number(p.defaultPrice.priceMicros) / 1e6).toFixed(2) + ' ' + p.defaultPrice.currency : ''}`);
@@ -77,16 +87,11 @@ function explain(err) {
           status: 'active',
           purchaseType: 'managedUser',
           defaultLanguage: 'en-US',
-          defaultPrice: { priceMicros: String(credits * 1e6), currency: 'USD' },
-          listings: {
-            'en-US': {
-              title: `$${credits} in credits`,
-              description: `$${credits} in Book of Memes credits for marketplace bids, premium and AI tools.`,
-            },
-          },
+          defaultPrice: { priceMicros: String(price * 1e6), currency: 'USD' },
+          listings: { 'en-US': { title, description } },
         },
       });
-      console.log(`  ✔ ${productId}  created ($${credits.toFixed(2)})`);
+      console.log(`  ✔ ${productId}  created ($${price.toFixed(2)})`);
     } catch (e) {
       console.log(`  ✘ ${productId}  could not create: ${explain(e)}`);
       missing += 1;
