@@ -4,7 +4,9 @@
 //
 // Buyer:  GET  /options          packages by currency, with the USD each credits
 //         GET  /                 my link deposits
-//         POST /start            { link_id } -> deposit with code, link and agent
+//         GET  /plan             ?currency=&target_usd= -> packages that together cover it
+//         POST /start            { link_id, amount? } -> deposit with code, link and agent
+// Public: GET  /listing-activity ?id= -> what anyone may see about a listing
 //         POST /submit           { id, payer_name, tx_ref }
 //         POST /cancel           { id }
 // Agent:  GET  /agent            deposits waiting for me (?status=submitted|paid|failed)
@@ -14,7 +16,7 @@
 import express from 'express';
 import { supabase } from '../config/db.js';
 import { authenticateToken } from '../auth.js';
-import { DEPOSIT_TIERS, DEPOSIT_CURRENCIES } from '../config/depositTiers.js';
+import { DEPOSIT_TIERS, DEPOSIT_CURRENCIES, planDeposits } from '../config/depositTiers.js';
 
 const router = express.Router();
 const UUID = /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
@@ -61,12 +63,17 @@ function depositView(p, link, agent) {
 router.get('/options', authenticateToken, async (_req, res) => {
   try {
     const [links, s, agents] = await Promise.all([
-      supabase.from('market_deposit_links').select('id, provider, pay_currency, pay_amount, instructions, sort_order').eq('is_active', true).order('sort_order').order('pay_amount'),
-      supabase.from('market_settings').select('link_deposit_spread_pct, link_deposit_daily_cap_usd, link_deposit_fee_pct, link_deposit_fee_min_usd, link_deposit_max_package_usd').eq('id', true).single(),
+      supabase.from('market_deposit_links').select('id, provider, pay_currency, pay_amount, min_amount, max_amount, instructions, sort_order').eq('is_active', true).order('sort_order').order('pay_amount'),
+      supabase.from('market_settings').select('link_deposit_spread_pct, link_deposit_daily_cap_usd, link_deposit_fee_pct, link_deposit_fee_min_usd, link_deposit_max_package_usd, link_deposit_large_usd').eq('id', true).single(),
       supabase.from('market_deposit_agents').select('user_id', { count: 'exact', head: true }).eq('is_active', true),
     ]);
     const settings = must(s);
-    const packages = await Promise.all(must(links).map(async (l) => {
+    const all = must(links);
+    const open = all.filter((l) => l.pay_amount === null).map((l) => ({
+      id: l.id, provider: l.provider, pay_currency: l.pay_currency, open: true,
+      min_amount: Number(l.min_amount), max_amount: Number(l.max_amount), instructions: l.instructions,
+    }));
+    const packages = await Promise.all(all.filter((l) => l.pay_amount !== null).map(async (l) => {
       const q = await quote(l.pay_currency, Number(l.pay_amount));
       return {
         id: l.id, provider: l.provider, pay_currency: l.pay_currency, pay_amount: Number(l.pay_amount), instructions: l.instructions,
@@ -80,8 +87,8 @@ router.get('/options', authenticateToken, async (_req, res) => {
     res.json({
       success: true,
       data: {
-        currencies: DEPOSIT_CURRENCIES.filter((c) => packages.some((p) => p.pay_currency === c)),
-        packages, spread_pct: Number(settings.link_deposit_spread_pct), daily_cap_usd: Number(settings.link_deposit_daily_cap_usd),
+        currencies: DEPOSIT_CURRENCIES.filter((c) => packages.some((p) => p.pay_currency === c) || open.some((o) => o.pay_currency === c)),
+        packages, open_links: open, large_usd: Number(settings.link_deposit_large_usd), spread_pct: Number(settings.link_deposit_spread_pct), daily_cap_usd: Number(settings.link_deposit_daily_cap_usd),
         fee_pct: Number(settings.link_deposit_fee_pct), fee_min_usd: Number(settings.link_deposit_fee_min_usd),
         max_package_usd: Number(settings.link_deposit_max_package_usd),
         agents_available: (agents.count || 0) > 0,
@@ -103,9 +110,67 @@ router.get('/', authenticateToken, async (req, res) => {
   } catch (err) { fail(res, err); }
 });
 
+// Packages (and/or an open-amount link) that together add at least
+// target_usd to the buyer's funds, in the chosen currency.
+router.get('/plan', authenticateToken, async (req, res) => {
+  try {
+    const currency = String(req.query.currency || 'USD').toUpperCase();
+    const target = Math.round(Number(req.query.target_usd) * 100) / 100;
+    if (!DEPOSIT_CURRENCIES.includes(currency)) throw userError('Unsupported currency');
+    if (!(target > 0)) throw userError('Enter how much you need');
+    const [links, s] = await Promise.all([
+      supabase.from('market_deposit_links').select('*').eq('is_active', true).eq('pay_currency', currency),
+      supabase.from('market_settings').select('link_deposit_spread_pct, link_deposit_fee_pct, link_deposit_fee_min_usd, link_deposit_daily_cap_usd').eq('id', true).single(),
+    ]);
+    const settings = must(s);
+    const rows = must(links);
+    const fixed = (await Promise.all(rows.filter((l) => l.pay_amount !== null).map(async (l) => {
+      const q = await quote(currency, Number(l.pay_amount));
+      return q && !q.over_ceiling ? { id: l.id, pay_amount: Number(l.pay_amount), credit_usd: money2(q.credit_usd), provider: l.provider } : null;
+    }))).filter(Boolean);
+    const openRow = rows.find((l) => l.pay_amount === null);
+    let amountForCredit = null;
+    let openLink = null;
+    if (openRow) {
+      openLink = { id: openRow.id, min_amount: Number(openRow.min_amount), max_amount: Number(openRow.max_amount) };
+      const q1 = await quote(currency, 1);
+      if (q1) {
+        const mid = Number(q1.mid_rate);
+        const spread = currency === 'USD' ? 0 : Number(settings.link_deposit_spread_pct) / 100;
+        const feePct = Number(settings.link_deposit_fee_pct) / 100;
+        const feeMin = Number(settings.link_deposit_fee_min_usd);
+        // Smallest amount in this currency whose credit covers the target.
+        amountForCredit = (t) => {
+          const usd = Math.max(t / (1 - spread - feePct), (t + feeMin) / (1 - spread));
+          return Math.ceil(usd * mid * 100 + 1) / 100;
+        };
+      }
+    }
+    const plan = planDeposits(target, fixed, openLink, amountForCredit);
+    if (!plan) throw userError('That is more than one plan can cover. Add funds in parts, or contact a deposit agent.');
+    const items = plan.items.map((i) => {
+      if (i.open) return { link_id: i.id, open: true, pay_amount: i.amount, provider: openRow.provider };
+      const f = fixed.find((x) => x.id === i.id);
+      return { link_id: f.id, pay_amount: f.pay_amount, credit_usd: f.credit_usd, provider: f.provider };
+    });
+    // Exact credit for the open amount from the database's own quote.
+    for (const it of items.filter((x) => x.open)) it.credit_usd = money2((await quote(currency, it.pay_amount))?.credit_usd ?? 0);
+    const total = money2(items.reduce((sum, i) => sum + Number(i.credit_usd || 0), 0));
+    res.json({
+      success: true,
+      data: {
+        currency, target_usd: target, items, total_credit_usd: total,
+        pay_total: money2(items.reduce((sum, i) => sum + i.pay_amount, 0)),
+        over_daily_cap: total > Number(settings.link_deposit_daily_cap_usd),
+      },
+    });
+  } catch (err) { fail(res, err); }
+});
+
 router.post('/start', authenticateToken, async (req, res) => {
   try {
-    const p = await rpc('market_start_link_deposit', { p_user_id: req.user.id, p_link_id: id(req.body?.link_id) });
+    const amount = req.body?.amount === undefined || req.body?.amount === null ? null : Number(req.body.amount);
+    const p = await rpc('market_start_link_deposit', { p_user_id: req.user.id, p_link_id: id(req.body?.link_id), p_amount: amount });
     const [link, agents] = await Promise.all([
       supabase.from('market_deposit_links').select('url, instructions').eq('id', p.deposit_link_id).single(),
       agentsById([p.agent_id]),
@@ -129,6 +194,14 @@ router.post('/cancel', authenticateToken, async (req, res) => {
   try {
     await rpc('market_cancel_link_deposit', { p_user_id: req.user.id, p_payment_id: id(req.body?.id) });
     res.json({ success: true });
+  } catch (err) { fail(res, err); }
+});
+
+// ── Public: listing activity (anyone) ───────────────────────────────────────
+router.get('/listing-activity', async (req, res) => {
+  try {
+    res.setHeader('Cache-Control', 'public, max-age=30');
+    res.json({ success: true, data: await rpc('market_listing_activity', { p_listing_id: id(req.query.id) }) });
   } catch (err) { fail(res, err); }
 });
 
@@ -188,7 +261,8 @@ router.get('/admin/tiers', authenticateToken, requireAdmin, async (_req, res) =>
           links: links.filter((l) => l.pay_currency === currency && Number(l.pay_amount) === amount),
         };
       })),
-      other_links: links.filter((l) => l.pay_currency === currency && !DEPOSIT_TIERS[currency].includes(Number(l.pay_amount))),
+      open_link: links.find((l) => l.pay_currency === currency && l.pay_amount === null) || null,
+      other_links: links.filter((l) => l.pay_currency === currency && l.pay_amount !== null && !DEPOSIT_TIERS[currency].includes(Number(l.pay_amount))),
     })));
     res.json({ success: true, data });
   } catch (err) { fail(res, err); }
@@ -204,7 +278,13 @@ function linkFields(b, partial = false) {
   const f = {};
   if (!partial || b.provider !== undefined) { f.provider = String(b.provider || '').trim(); if (f.provider.length < 2) throw userError('Name the wallet app'); }
   if (!partial || b.pay_currency !== undefined) { f.pay_currency = String(b.pay_currency || '').toUpperCase(); if (!DEPOSIT_CURRENCIES.includes(f.pay_currency)) throw userError(`Currency must be one of ${DEPOSIT_CURRENCIES.join(', ')}`); }
-  if (!partial || b.pay_amount !== undefined) { f.pay_amount = Math.round(Number(b.pay_amount) * 100) / 100; if (!(f.pay_amount > 0)) throw userError('Enter the package amount'); }
+  if (b.open) {
+    // Open-amount link: the buyer types any amount from min to max.
+    f.pay_amount = null;
+    f.min_amount = Math.round(Number(b.min_amount) * 100) / 100;
+    f.max_amount = Math.round(Number(b.max_amount) * 100) / 100;
+    if (!(f.min_amount > 0) || !(f.max_amount > f.min_amount)) throw userError('Enter a minimum and a larger maximum');
+  } else if (!partial || b.pay_amount !== undefined) { f.pay_amount = Math.round(Number(b.pay_amount) * 100) / 100; if (!(f.pay_amount > 0)) throw userError('Enter the package amount'); }
   if (!partial || b.url !== undefined) {
     f.url = String(b.url || '').trim();
     try { const u = new URL(f.url); if (u.protocol !== 'https:') throw new Error(); } catch { throw userError('The payment link must be a full https:// address'); }
@@ -216,7 +296,13 @@ function linkFields(b, partial = false) {
 }
 
 async function checkCeiling(f) {
-  if (f.pay_currency === undefined || f.pay_amount === undefined) return;
+  if (f.pay_currency !== undefined && f.max_amount !== undefined) {
+    const q = await quote(f.pay_currency, f.max_amount);
+    if (!q) throw userError(`No current ${f.pay_currency} exchange rate. Try again later.`);
+    if (q.over_ceiling) throw userError('The maximum is above the deposit ceiling. Use a smaller maximum.');
+    return;
+  }
+  if (f.pay_currency === undefined || f.pay_amount === undefined || f.pay_amount === null) return;
   const q = await quote(f.pay_currency, f.pay_amount);
   if (!q) throw userError(`No current ${f.pay_currency} exchange rate. Try again later.`);
   if (q.over_ceiling) throw userError('This package is above the deposit ceiling. Use a smaller amount.');
