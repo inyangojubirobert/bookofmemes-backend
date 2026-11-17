@@ -4,7 +4,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { supabase } from '../config/db.js';
 import { ITEM_TYPES, CONTENT_TYPES, ALL_TYPES } from '../config/itemTypes.js';
 import { authenticateToken } from '../auth.js';
-import { isPremium } from '../utils/isPremium.js';
+import { getAiPlan } from '../utils/isPremium.js';
 import { CREDIT_PRICES, formatCredits, creditsToLogUnits, hasCredits, chargeCredits } from '../utils/credits.js';
 import { makeDailyCounter } from '../utils/dailyQuota.js';
 import { logGeneration } from '../utils/aiGenerationLog.js';
@@ -47,24 +47,23 @@ const MAX_MESSAGE_LENGTH = 4000;
 // client-supplied body field that could be spoofed to dodge the limit or
 // burn through another user's quota.
 const DAILY_QUOTA_WINDOW_MS = 24 * 60 * 60 * 1000;
-const FREE_DAILY_LIMIT = 5;
-const PREMIUM_DAILY_LIMIT = 200; // generous, but still a backstop against runaway cost
+// Per-plan daily limits: config/aiPlans.js (researchPerDay).
 const dailyQuotaHits = new Map(); // userId -> [timestamps]
 
 async function dailyResearchQuota(req, res, next) {
   const userId = req.user?.id;
   if (!userId) return res.status(401).json({ error: 'Sign in required' });
 
-  const premium = await isPremium(userId);
-  const limit = premium ? PREMIUM_DAILY_LIMIT : FREE_DAILY_LIMIT;
+  const plan = await getAiPlan(userId);
+  const limit = plan.limits.researchPerDay;
 
   const now = Date.now();
   const hits = (dailyQuotaHits.get(userId) || []).filter((t) => now - t < DAILY_QUOTA_WINDOW_MS);
   if (hits.length >= limit) {
     return res.status(429).json({
-      error: premium
+      error: plan.id === 'business'
         ? 'Daily AI research limit reached. Try again tomorrow.'
-        : `Free daily limit of ${FREE_DAILY_LIMIT} AI research requests reached. Upgrade to Premium for more.`,
+        : `${plan.name} plan limit of ${limit} AI research requests a day reached. Upgrade your plan for more.`,
     });
   }
   hits.push(now);
@@ -148,8 +147,7 @@ router.get('/languages', (_req, res) => {
 // ── Bascardo AI Content: writing (captions, titles, short scripts) ───────
 // Distinct quota from /chat and /search's dailyResearchQuota above -- this is
 // the "Generate Bascardo AI Content" writing tab, not the general assistant.
-const WRITE_FREE_DAILY_LIMIT = 10;
-const WRITE_PREMIUM_DAILY_LIMIT = 100;
+// Per-plan daily writing limits: config/aiPlans.js (writingPerDay).
 const WRITE_OVERAGE_COST = CREDIT_PRICES.writeOverage; // credits per generation once the daily free cap is used up
 const writeQuota = makeDailyCounter();
 
@@ -158,9 +156,9 @@ const BASCARDO_WRITE_SYSTEM_PROMPT = `You write short-form content for Bascardo/
 // GET /api/ai/write/quota
 router.get('/write/quota', authenticateToken, async (req, res) => {
   try {
-    const premium = await isPremium(req.user.id);
-    const limit = premium ? WRITE_PREMIUM_DAILY_LIMIT : WRITE_FREE_DAILY_LIMIT;
-    res.json({ success: true, data: { limit, remaining: Math.max(0, limit - writeQuota.usedToday(req.user.id)), overageCostCredits: WRITE_OVERAGE_COST, premium } });
+    const plan = await getAiPlan(req.user.id);
+    const limit = plan.limits.writingPerDay;
+    res.json({ success: true, data: { limit, remaining: Math.max(0, limit - writeQuota.usedToday(req.user.id)), overageCostCredits: WRITE_OVERAGE_COST, premium: plan.premiumModels, plan: plan.id, planName: plan.name } });
   } catch (err) {
     console.error('Write quota error:', err);
     res.status(500).json({ success: false, error: 'Failed to load quota' });
@@ -178,8 +176,9 @@ router.post('/write', authenticateToken, async (req, res) => {
   const userId = req.user.id;
 
   try {
-    const premium = await isPremium(userId);
-    const limit = premium ? WRITE_PREMIUM_DAILY_LIMIT : WRITE_FREE_DAILY_LIMIT;
+const plan = await getAiPlan(userId);
+    const premium = plan.premiumModels;
+    const limit = plan.limits.writingPerDay;
     const overFreeCap = writeQuota.usedToday(userId) >= limit;
 
     if (overFreeCap) {

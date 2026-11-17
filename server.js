@@ -21,6 +21,7 @@ import { startLeadershipGamesSweepTimer } from "./routes/leadershipGamesRoutes.j
 import linkPreviewRoutes from "./routes/linkPreviewRoutes.js";
 import marketRoutes, { accountRouter, startMarketTimers } from "./routes/marketRoutes.js";
 import adsRoutes from "./routes/adsRoutes.js";
+import subscriptionRoutes from "./routes/subscriptionRoutes.js";
 
 
 dotenv.config();
@@ -54,6 +55,7 @@ app.use("/api/marketplace", marketplaceRoutes);
 app.use("/api/market", marketRoutes);      // real-money marketplace (migration 055)
 app.use("/api/account", accountRouter);    // account deletion
 app.use("/api/ads", adsRoutes);            // advertising, boosts and campaigns (migration 058)
+app.use("/api/subscriptions", subscriptionRoutes); // Bascardo AI plans as Google Play subscriptions (migration 059)
 
 // AI features
 app.use("/api/ai", aiRoutes);

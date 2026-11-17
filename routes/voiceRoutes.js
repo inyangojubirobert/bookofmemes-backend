@@ -2,7 +2,7 @@ import express from 'express';
 import crypto from 'crypto';
 import { supabase } from '../config/db.js';
 import { authenticateToken } from '../auth.js';
-import { isPremium } from '../utils/isPremium.js';
+import { getAiPlan } from '../utils/isPremium.js';
 import { CREDIT_PRICES, formatCredits, creditsToLogUnits, hasCredits, chargeCredits } from '../utils/credits.js';
 import { monthlyUsage, recordMonthlyUsage } from '../utils/monthlyQuota.js';
 import { logGeneration } from '../utils/aiGenerationLog.js';
@@ -44,8 +44,7 @@ const RUNWARE_API_KEY = process.env.RUNWARE_API_KEY;
 // simpler and more meaningful to a user than a raw character or token count,
 // and independent of whichever provider/model is actually behind the scenes.
 const CHARS_PER_SECOND = 15; // ~150 wpm, ~6 chars/word incl. spaces
-const FREE_SECONDS_PER_MONTH = 120; // 2 minutes/month
-const PREMIUM_SECONDS_PER_MONTH = 1800; // 30 minutes/month
+// Monthly narration allowance per plan: config/aiPlans.js (narrationSecondsPerMonth).
 const HD_COST_PER_MINUTE = CREDIT_PRICES.voiceHdPerMinute; // credits per started minute of HD narration
 const MAX_CHARS_PER_REQUEST = 1200; // ~80s -- keeps any single call bounded regardless of tier
 
@@ -104,13 +103,16 @@ async function synthesizeSpeech(text, { useHdModel }) {
 router.get('/quota', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.id;
-    const premium = await isPremium(userId);
-    const limitSeconds = premium ? PREMIUM_SECONDS_PER_MONTH : FREE_SECONDS_PER_MONTH;
+const plan = await getAiPlan(userId);
+    const premium = plan.premiumModels;
+    const limitSeconds = plan.limits.narrationSecondsPerMonth;
     const usedSeconds = await monthlyUsage(userId, 'voice');
     res.json({
       success: true,
       data: {
         premium,
+        plan: plan.id,
+        planName: plan.name,
         limitSeconds,
         remainingSeconds: Math.max(0, limitSeconds - usedSeconds),
         hdCostCreditsPerMinute: HD_COST_PER_MINUTE,
@@ -148,7 +150,8 @@ router.post('/narrate', authenticateToken, async (req, res) => {
   const genStartedAt = Date.now(); // fallback latency source if synthesizeSpeech() itself is never reached
 
   try {
-    const premium = await isPremium(userId);
+const plan = await getAiPlan(userId);
+    const premium = plan.premiumModels;
     let cost = 0;
     if (hd) {
       cost = Math.round(Math.ceil(seconds / 60) * HD_COST_PER_MINUTE * 100) / 100;
@@ -156,7 +159,7 @@ router.post('/narrate', authenticateToken, async (req, res) => {
         return res.status(402).json({ success: false, error: `This would cost ${formatCredits(cost)} in credits. Buy credits in your Wallet and try again.` });
       }
     } else {
-      const limitSeconds = premium ? PREMIUM_SECONDS_PER_MONTH : FREE_SECONDS_PER_MONTH;
+      const limitSeconds = plan.limits.narrationSecondsPerMonth;
       const usedSeconds = await monthlyUsage(userId, 'voice');
       if (usedSeconds + seconds > limitSeconds) {
         return res.status(429).json({

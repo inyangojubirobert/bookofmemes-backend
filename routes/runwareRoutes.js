@@ -3,7 +3,7 @@ import crypto from 'crypto';
 import { v2 as cloudinary } from 'cloudinary';
 import { supabase } from '../config/db.js';
 import { authenticateToken } from '../auth.js';
-import { isPremium } from '../utils/isPremium.js';
+import { getAiPlan } from '../utils/isPremium.js';
 import { CREDIT_PRICES, formatCredits, creditsToLogUnits, hasCredits, chargeCredits } from '../utils/credits.js';
 import { monthlyUsage, recordMonthlyUsage } from '../utils/monthlyQuota.js';
 import { logGeneration } from '../utils/aiGenerationLog.js';
@@ -60,12 +60,9 @@ cloudinary.config({
 // bill, x 5 images/day is not). HD spends in-app credits instead of
 // counting against either cap, so a user who blows through their monthly
 // free allowance can still pay per-generation rather than being hard-blocked.
-const IMAGE_FREE_MONTHLY_LIMIT = 5;
-const IMAGE_PREMIUM_MONTHLY_LIMIT = 100;
+// Monthly image/video allowances per plan: config/aiPlans.js.
 const IMAGE_HD_COST = CREDIT_PRICES.imageHd;
 
-const VIDEO_FREE_MONTHLY_LIMIT = 1;
-const VIDEO_PREMIUM_MONTHLY_LIMIT = 20;
 const VIDEO_FREE_DURATION_SECONDS = 5;
 const VIDEO_HD_COST = CREDIT_PRICES.videoHd; // video runs far more than images provider-side -- priced accordingly
 
@@ -280,14 +277,17 @@ async function watermarkImage(remoteImageUrl) {
 router.get('/quota', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.id;
-    const premium = await isPremium(userId);
-    const imageLimit = premium ? IMAGE_PREMIUM_MONTHLY_LIMIT : IMAGE_FREE_MONTHLY_LIMIT;
-    const videoLimit = premium ? VIDEO_PREMIUM_MONTHLY_LIMIT : VIDEO_FREE_MONTHLY_LIMIT;
+const plan = await getAiPlan(userId);
+    const premium = plan.premiumModels;
+    const imageLimit = plan.limits.imagesPerMonth;
+    const videoLimit = plan.limits.videosPerMonth;
     const [imageUsed, videoUsed] = await Promise.all([monthlyUsage(userId, 'image'), monthlyUsage(userId, 'video')]);
     res.json({
       success: true,
       data: {
         premium,
+        plan: plan.id,
+        planName: plan.name,
         image: { limit: imageLimit, remaining: Math.max(0, imageLimit - imageUsed), hdCostCredits: IMAGE_HD_COST, watermarkFree: premium, period: 'month' },
         video: { limit: videoLimit, remaining: Math.max(0, videoLimit - videoUsed), hdCostCredits: VIDEO_HD_COST, durationSeconds: VIDEO_FREE_DURATION_SECONDS, watermarkFree: premium, period: 'month' },
       },
@@ -320,14 +320,15 @@ router.post('/image', authenticateToken, async (req, res) => {
   const genStartedAt = Date.now(); // fallback latency source if generateImage() itself is never reached
 
   try {
-    const premium = await isPremium(userId);
+const plan = await getAiPlan(userId);
+    const premium = plan.premiumModels;
 
     if (hd) {
       if (!(await hasCredits(userId, IMAGE_HD_COST))) {
         return res.status(402).json({ success: false, error: `HD generation costs ${formatCredits(IMAGE_HD_COST)} in credits. Buy credits in your Wallet and try again.` });
       }
     } else {
-      const limit = premium ? IMAGE_PREMIUM_MONTHLY_LIMIT : IMAGE_FREE_MONTHLY_LIMIT;
+      const limit = plan.limits.imagesPerMonth;
       if ((await monthlyUsage(userId, 'image')) >= limit) {
         return res.status(429).json({ success: false, error: `Free monthly limit of ${limit} images reached. Try HD (uses credits) or wait for next month.` });
       }
@@ -379,14 +380,15 @@ router.post('/video', authenticateToken, async (req, res) => {
   const genStartedAt = Date.now(); // fallback latency source if generateVideo() itself is never reached
 
   try {
-    const premium = await isPremium(userId);
+const plan = await getAiPlan(userId);
+    const premium = plan.premiumModels;
 
     if (hd) {
       if (!(await hasCredits(userId, VIDEO_HD_COST))) {
         return res.status(402).json({ success: false, error: `HD video costs ${formatCredits(VIDEO_HD_COST)} in credits. Buy credits in your Wallet and try again.` });
       }
     } else {
-      const limit = premium ? VIDEO_PREMIUM_MONTHLY_LIMIT : VIDEO_FREE_MONTHLY_LIMIT;
+      const limit = plan.limits.videosPerMonth;
       if ((await monthlyUsage(userId, 'video')) >= limit) {
         return res.status(429).json({ success: false, error: `Free monthly limit of ${limit} video${limit === 1 ? '' : 's'} reached. Try HD (uses credits) or wait for next month.` });
       }

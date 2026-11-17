@@ -1,5 +1,5 @@
-// Checks (and optionally creates) the Google Play products: credit packs plus
-// the ad and boost packages.
+// Checks (and optionally creates) the Google Play products: credit packs, the
+// ad and boost packages, and the Bascardo AI Pro / Business subscriptions.
 //
 //   node --env-file=.env scripts/playBilling.js           check setup
 //   node --env-file=.env scripts/playBilling.js --create  also create missing products
@@ -9,6 +9,7 @@
 // (PLAY_AD_PRODUCTS). Google converts them to local prices.
 import { createPlayAuthClient, loadPlayServiceAccount } from '../config/playAuth.js';
 import { PLAY_CREDIT_PRODUCTS, PLAY_AD_PRODUCTS, PLAY_PACKAGE_NAME } from '../config/playProducts.js';
+import { AI_PLANS, AI_BASE_PLAN_ID } from '../config/aiPlans.js';
 
 const API = `https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${PLAY_PACKAGE_NAME}`;
 const create = process.argv.includes('--create');
@@ -94,6 +95,83 @@ function explain(err) {
       console.log(`  ✔ ${productId}  created ($${price.toFixed(2)})`);
     } catch (e) {
       console.log(`  ✘ ${productId}  could not create: ${explain(e)}`);
+      missing += 1;
+    }
+  }
+
+  // ── Subscriptions: Bascardo AI Pro and Business (config/aiPlans.js) ──────
+  // One auto-renewing monthly base plan each ("monthly"), priced in USD and
+  // converted by Google to every region.
+  let subs = {};
+  try {
+    const res = await client.request({ url: `${API}/subscriptions?pageSize=100` });
+    for (const s of res.data.subscriptions || []) subs[s.productId] = s;
+  } catch (e) {
+    console.log(`✘ Could not read subscriptions: ${explain(e)}`);
+    process.exit(1);
+  }
+  for (const plan of Object.values(AI_PLANS).filter((p) => p.googlePlayProductId)) {
+    const productId = plan.googlePlayProductId;
+    const s = subs[productId];
+    if (s) {
+      const base = (s.basePlans || []).find((b) => b.basePlanId === AI_BASE_PLAN_ID);
+      console.log(`  ✔ ${productId}  subscription, base plan "${AI_BASE_PLAN_ID}": ${base ? base.state : 'MISSING'}`);
+      if (!base) { console.log(`     → add an auto-renewing monthly base plan with id "${AI_BASE_PLAN_ID}"`); missing += 1; }
+      else if (base.state !== 'ACTIVE') {
+        if (!create) { console.log('     → activate the base plan (or run with --create)'); missing += 1; continue; }
+        try {
+          await client.request({ url: `${API}/subscriptions/${productId}/basePlans/${AI_BASE_PLAN_ID}:activate`, method: 'POST', data: {} });
+          console.log('     ✔ base plan activated');
+        } catch (e) { console.log(`     ✘ could not activate: ${explain(e)}`); missing += 1; }
+      }
+      continue;
+    }
+    if (!create) { console.log(`  ✘ ${productId}  subscription missing`); missing += 1; continue; }
+    try {
+      const conv = await client.request({
+        url: `${API}/pricing:convertRegionPrices`, method: 'POST',
+        data: { price: { currencyCode: 'USD', units: String(plan.priceUsd), nanos: 0 } },
+      });
+      const regions = Object.values(conv.data.convertedRegionPrices || {});
+      const version = conv.data.regionVersion?.version;
+      await client.request({
+        url: `${API}/subscriptions?productId=${productId}&regionsVersion.version=${encodeURIComponent(version)}`,
+        method: 'POST',
+        data: {
+          packageName: PLAY_PACKAGE_NAME,
+          productId,
+          listings: [{
+            languageCode: 'en-US',
+            title: `Bascardo AI ${plan.name}`,
+            description: `Bascardo AI ${plan.name} for Book of Memes: more AI research, writing, images, video and narration every month.`,
+            benefits: [
+              `${plan.limits.imagesPerMonth} AI images a month`,
+              `${plan.limits.videosPerMonth} AI videos a month`,
+              `${Math.round(plan.limits.narrationSecondsPerMonth / 60)} min narration a month`,
+              'No watermark, premium models',
+            ],
+          }],
+          basePlans: [{
+            basePlanId: AI_BASE_PLAN_ID,
+            autoRenewingBasePlanType: {
+              billingPeriodDuration: 'P1M',
+              gracePeriodDuration: 'P3D',
+              resubscribeState: 'RESUBSCRIBE_STATE_ACTIVE',
+              prorationMode: 'SUBSCRIPTION_PRORATION_MODE_CHARGE_ON_NEXT_BILLING_DATE',
+            },
+            regionalConfigs: regions.map((r) => ({ regionCode: r.regionCode, newSubscriberAvailability: true, price: r.price })),
+            otherRegionsConfig: {
+              usdPrice: conv.data.convertedOtherRegionsPrice?.usdPrice,
+              eurPrice: conv.data.convertedOtherRegionsPrice?.eurPrice,
+              newSubscriberAvailability: true,
+            },
+          }],
+        },
+      });
+      await client.request({ url: `${API}/subscriptions/${productId}/basePlans/${AI_BASE_PLAN_ID}:activate`, method: 'POST', data: {} });
+      console.log(`  ✔ ${productId}  subscription created ($${plan.priceUsd}/month, ${regions.length} regions) and activated`);
+    } catch (e) {
+      console.log(`  ✘ ${productId}  could not create subscription: ${explain(e)}`);
       missing += 1;
     }
   }
