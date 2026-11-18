@@ -24,6 +24,7 @@ import depositRoutes from "./routes/depositRoutes.js";
 import adsRoutes from "./routes/adsRoutes.js";
 import subscriptionRoutes from "./routes/subscriptionRoutes.js";
 import notificationRoutes from "./routes/notificationRoutes.js";
+import storyRoutes from "./routes/storyRoutes.js";
 
 
 dotenv.config();
@@ -60,6 +61,7 @@ app.use("/api/account", accountRouter);    // account deletion
 app.use("/api/ads", adsRoutes);            // advertising, boosts and campaigns (migration 058)
 app.use("/api/subscriptions", subscriptionRoutes); // Bascardo AI plans as Google Play subscriptions (migration 059)
 app.use("/api/notifications", notificationRoutes); // in-app notifications inbox
+app.use("/api/story", storyRoutes); // Bascardo Story Studio (migration 064)
 
 // AI features
 app.use("/api/ai", aiRoutes);

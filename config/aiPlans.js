@@ -66,6 +66,11 @@ export const ACTION_COSTS = {
   image: { fast: 1, premium: 7, premiumWithReference: 12 },
   video: { fast: 50, premium: 125, premiumWithReference: 310 },
   narrationPerMinute: { fast: 1, premium: 4 },
+  // Story Studio (routes/storyRoutes.js, config/storyEngine.js)
+  storyPlan: { fast: 4, premium: 4 },         // read the idea/script, plan the story, offer 3 directions
+  storyChapter: { fast: 6, premium: 6 },      // write a chapter, then update the story memory + next ideas
+  storyIdeas: { fast: 2, premium: 2 },        // fresh ideas for what happens next
+  storyContinue: { fast: 4, premium: 4 },     // read an existing story to continue it
 };
 
 // Our worst-case cost per action in USD (Haiku 4.5: $1 / $5 per million input / output tokens):
@@ -78,6 +83,10 @@ export const ACTION_COSTS = {
 //              example is $0.95), from a start image up to ~$2 (Runware examples)
 //   narration  premium: Fish Audio S2.1 pro, $15 per 1M bytes ≈ $0.02 a minute; fast: Gemini flash TTS ≤ $0.005
 //   correction ≤500 characters in, 200 tokens out                                      ≈ $0.0011
+//   storyPlan     ≤5.2k input (idea/script capped at 16,000 characters) + 4,000 output  ≈ $0.0252
+//   storyChapter  write ≤4.6k in + 3,500 out, then memory ≤5.5k in + 2,000 out        ≈ $0.0376
+//   storyIdeas    ≤3k input + 900 output                                               ≈ $0.0075
+//   storyContinue ≤7k input (synopsis + recent chapters, 24,000 characters) + 3,000 out ≈ $0.0220
 export const ACTION_COST_USD = {
   research: { fast: 0.0065, premium: 0.0065 },
   translate: { fast: 0.0062, premium: 0.0062 },
@@ -86,6 +95,10 @@ export const ACTION_COST_USD = {
   image: { fast: 0.0006, premium: 0.045, premiumWithReference: 0.075 },
   video: { fast: 0.30, premium: 0.80, premiumWithReference: 2.0 },
   narrationPerMinute: { fast: 0.005, premium: 0.02 },
+  storyPlan: { fast: 0.0252, premium: 0.0252 },
+  storyChapter: { fast: 0.0376, premium: 0.0376 },
+  storyIdeas: { fast: 0.0075, premium: 0.0075 },
+  storyContinue: { fast: 0.0220, premium: 0.0220 },
 };
 export const CORRECTION_COST_USD = 0.0011;
 
