@@ -30,7 +30,7 @@ import {
 } from '../utils/cloudinaryAds.js';
 
 const router = express.Router();
-const PLACEMENTS = new Set(['home', 'explore', 'feed', 'search']);
+const PLACEMENTS = new Set(['home', 'explore', 'feed', 'search', 'content']); // content = inside a post, while it's being read/watched
 const ITEM_TYPES = new Set(['stories', 'memes', 'puzzles', 'kids_collections', 'music_box', 'podcast_box', 'tv_box', 'books_library']);
 const ITEM_IMAGE = { stories: 'cover_image_url', memes: 'image_url', puzzles: null, kids_collections: 'cover_image_url', music_box: 'cover_image_url', podcast_box: 'cover_image_url', tv_box: 'thumbnail_url', books_library: 'cover_image_url' };
 const FREQUENCY_CAP_PER_DAY = 6;
@@ -110,6 +110,14 @@ const campaignState = (c, now = Date.now()) =>
   (c.status === 'active' && c.ends_at && new Date(c.ends_at).getTime() <= now ? 'completed' : c.status);
 
 // Stable, non-reversible viewer key: the app's random install id, else IP + browser.
+// The signed-in viewer, if any (ads never require sign-in). Used only so an
+// owner viewing their own content doesn't earn from it.
+async function optionalViewerId(req) {
+  const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (!token) return null;
+  try { const { data } = await supabase.auth.getUser(token); return data?.user?.id || null; } catch { return null; }
+}
+
 function viewerKey(req) {
   const supplied = String(req.headers['x-ad-viewer'] || '').slice(0, 128);
   const ip = String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').split(',')[0].trim();
@@ -632,10 +640,125 @@ router.post('/event', async (req, res) => {
     const { data } = house
       ? await supabase.rpc('house_ads_record_event', { p_house_ad_id: id, p_kind: kind, p_placement: placement, p_viewer_key: viewerKey(req) })
       : await supabase.rpc('ads_record_event', { p_campaign_id: id, p_kind: kind, p_placement: placement, p_viewer_key: viewerKey(req) });
+    // Inside content: also credit the view to the content's owner (068).
+    const itemType = req.body?.item_type;
+    const itemId = String(req.body?.item_id || '');
+    if (data && kind === 'impression' && placement === 'content' && ITEM_TYPES.has(itemType) && /^[0-9a-f-]{36}$/i.test(itemId)) {
+      await supabase.rpc('content_ads_record', {
+        p_item_type: itemType, p_item_id: itemId, p_source: house ? 'house' : 'campaign', p_ad_ref: id,
+        p_viewer_key: viewerKey(req), p_viewer_id: await optionalViewerId(req),
+      }).then(() => {}, (e) => console.warn('[ads] content attribution failed:', e.message));
+    }
     res.json({ success: true, data: { recorded: !!data } });
   } catch (err) {
     res.json({ success: true, data: { recorded: false } });
   }
+});
+
+// ── Google AdMob inside content ────────────────────────────────────────────
+// The app reports each AdMob ad shown inside content (kind 'view'), and each
+// paid event Google sends for it (kind 'paid', value in the ad's currency;
+// USD is expected from AdMob's reporting currency).
+router.post('/content/admob', async (req, res) => {
+  const b = req.body || {};
+  const kind = b.kind === 'paid' ? 'paid' : 'view';
+  const unit = String(b.ad_unit || '').slice(0, 100);
+  if (!ITEM_TYPES.has(b.item_type) || !/^[0-9a-f-]{36}$/i.test(String(b.item_id || '')) || !unit) {
+    return res.status(400).json({ success: false, error: 'item_type, item_id and ad_unit are required' });
+  }
+  let value = null;
+  if (kind === 'paid') {
+    value = Number(b.value);
+    if (!Number.isFinite(value) || value < 0 || value > 50) return res.status(400).json({ success: false, error: 'Invalid value' });
+    if (b.currency && String(b.currency).toUpperCase() !== 'USD') {
+      console.warn(`[ads] AdMob paid event in ${b.currency}; set the AdMob reporting currency to USD`);
+      return res.json({ success: true, data: { recorded: false } });
+    }
+  }
+  try {
+    const { data } = await supabase.rpc('content_ads_record', {
+      p_item_type: b.item_type, p_item_id: b.item_id, p_source: kind === 'paid' ? 'admob_paid' : 'admob', p_ad_ref: unit,
+      p_viewer_key: viewerKey(req), p_viewer_id: await optionalViewerId(req), p_value_usd: value, p_precision: b.precision ? String(b.precision) : null,
+    });
+    res.json({ success: true, data: { recorded: !!data } });
+  } catch { res.json({ success: true, data: { recorded: false } }); }
+});
+
+// ── Authors: what ads in my content earned ─────────────────────────────────
+const monthStart = (d = new Date()) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)).toISOString().slice(0, 10);
+router.get('/content/earnings', authenticateToken, async (req, res) => {
+  try {
+    const month = /^\d{4}-\d{2}-01$/.test(String(req.query.month || '')) ? req.query.month : monthStart();
+    const [{ data: cfg }, { data: settled }, { data: payouts }] = await Promise.all([
+      supabase.from('content_ad_settings').select('author_share_pct').maybeSingle(),
+      supabase.from('content_ad_months').select('month, share_pct, settled_at').eq('month', month).maybeSingle(),
+      supabase.from('content_ad_payouts').select('month, impressions, revenue_usd, earnings_usd, breakdown').eq('owner_id', req.user.id).order('month', { ascending: false }).limit(12),
+    ]);
+    const share = Number(settled?.share_pct ?? cfg?.author_share_pct ?? 50);
+    const { data: rows, error } = await supabase.rpc('content_ads_month_report', { p_month: month });
+    if (error) throw error;
+    const mine = (rows || []).filter((r) => r.owner_id === req.user.id);
+    const byType = {};
+    for (const r of mine) {
+      const t = (byType[r.item_type] ||= { item_type: r.item_type, views: 0, revenue_usd: 0 });
+      t.views += Number(r.impressions); t.revenue_usd += Number(r.revenue_usd);
+    }
+    // Top items with their titles.
+    const top = [...mine].sort((a, b) => Number(b.impressions) - Number(a.impressions)).slice(0, 10);
+    const titled = await Promise.all(top.map(async (r) => {
+      const table = { stories: 'stories', memes: 'memes', puzzles: 'puzzles', kids_collections: 'kids_collections', music_box: 'music_box', podcast_box: 'podcast_box', tv_box: 'tv_box', books_library: 'books_library' }[r.item_type];
+      const { data } = table ? await supabase.from(table).select('title').eq('id', r.item_id).maybeSingle() : { data: null };
+      return { item_type: r.item_type, item_id: r.item_id, title: data?.title || 'Untitled', views: Number(r.impressions), revenue_usd: Number(r.revenue_usd) };
+    }));
+    const views = mine.reduce((s2, r) => s2 + Number(r.impressions), 0);
+    const revenue = mine.reduce((s2, r) => s2 + Number(r.revenue_usd), 0);
+    res.json({
+      success: true,
+      data: {
+        month, settled: !!settled, share_pct: share, views,
+        revenue_usd: Math.round(revenue * 10000) / 10000,
+        estimated_earnings_usd: Math.round(revenue * share) / 100,
+        by_type: Object.values(byType).map((t) => ({ ...t, revenue_usd: Math.round(t.revenue_usd * 10000) / 10000 })),
+        top_items: titled,
+        history: payouts || [],
+      },
+    });
+  } catch (err) { fail(res, err, 'Could not load ad earnings'); }
+});
+
+// ── Admin: settle a finished month ─────────────────────────────────────────
+router.get('/content/admin/month', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const month = String(req.query.month || '');
+    if (!/^\d{4}-\d{2}-01$/.test(month)) return res.status(400).json({ success: false, error: 'month must be YYYY-MM-01' });
+    const manual = req.query.admob_usd ? Number(req.query.admob_usd) : null;
+    const [{ data: rows, error }, { data: settled }, { data: cfg }] = await Promise.all([
+      supabase.rpc('content_ads_month_report', { p_month: month, p_admob_manual_usd: manual }),
+      supabase.from('content_ad_months').select('*').eq('month', month).maybeSingle(),
+      supabase.from('content_ad_settings').select('author_share_pct').maybeSingle(),
+    ]);
+    if (error) throw error;
+    const owners = new Set((rows || []).map((r) => r.owner_id));
+    const revenue = (rows || []).reduce((s2, r) => s2 + Number(r.revenue_usd), 0);
+    res.json({ success: true, data: { month, settled, owners: owners.size, views: (rows || []).reduce((s2, r) => s2 + Number(r.impressions), 0),
+      revenue_usd: Math.round(revenue * 10000) / 10000, share_pct: Number(cfg?.author_share_pct ?? 50),
+      authors_usd: Math.round(revenue * Number(cfg?.author_share_pct ?? 50)) / 100 } });
+  } catch (err) { fail(res, err); }
+});
+router.post('/content/admin/settle', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const month = String(req.body?.month || '');
+    if (!/^\d{4}-\d{2}-01$/.test(month)) return res.status(400).json({ success: false, error: 'month must be YYYY-MM-01' });
+    const manual = req.body?.admob_usd !== undefined && req.body.admob_usd !== null && req.body.admob_usd !== '' ? Number(req.body.admob_usd) : null;
+    if (manual !== null && (!Number.isFinite(manual) || manual < 0)) return res.status(400).json({ success: false, error: 'Invalid AdMob amount' });
+    const { data, error } = await supabase.rpc('content_ads_settle', { p_month: month, p_admin: req.user.id, p_admob_manual_usd: manual });
+    if (error) {
+      const msg = { month_not_finished: 'That month has not finished yet.', month_already_settled: 'That month is already settled.', month_must_be_first_day: 'Use the first day of the month.' };
+      const key = Object.keys(msg).find((k) => error.message.includes(k));
+      return res.status(400).json({ success: false, error: key ? msg[key] : 'Settlement failed' });
+    }
+    res.json({ success: true, data });
+  } catch (err) { fail(res, err, 'Settlement failed'); }
 });
 
 // ── Admin ──────────────────────────────────────────────────────────────────

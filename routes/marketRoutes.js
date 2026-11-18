@@ -355,7 +355,12 @@ router.get('/admin/treasury', authenticateToken, requireAdmin, async (_req, res)
       const amt = Number(l.amount);
       if (l.bucket === 'platform') cur(l.currency).platform += amt;
       else if (l.bucket === 'funds' && l.user_id) cur(l.currency).funds += amt;
-      else if (l.bucket === 'earnings' && l.user_id) cur(l.currency).earnings += amt;
+      else if (l.bucket === 'earnings' && l.user_id) {
+        cur(l.currency).earnings += amt;
+        // Authors' ad earnings are paid from ad revenue (AdMob/advertisers), not
+        // from users' payments, so they count as money in (migration 068).
+        if (l.kind === 'ad_revenue') { cur(l.currency).credited += amt; cur(l.currency).ad_revenue = (cur(l.currency).ad_revenue || 0) + amt; }
+      }
     }
     for (const b of bids) cur(b.settle_currency).escrow += Number(b.settle_amount);
     for (const w of withdrawals) {
