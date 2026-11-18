@@ -329,6 +329,52 @@ async function requireAdmin(req, res, next) {
   } catch (err) { fail(res, err); }
 }
 
+// Treasury check, per settlement currency, before approving payouts:
+//   credited      money users paid in (credited to their funds)
+//   owed          what the platform still owes them: spendable funds, bids held
+//                 in escrow, unpaid earnings, payouts in progress
+//   paid_out      payouts already sent
+//   platform      fees the platform has earned (bid/purchase fees, commission)
+// The ledger is double-entry, so credited = owed + paid_out + platform; any
+// difference means a bug or a manual change and must be looked at before
+// paying anyone. "hold_at_least" is what must be in the bank/wallet for the
+// currency to cover every user (owed).
+router.get('/admin/treasury', authenticateToken, requireAdmin, async (_req, res) => {
+  try {
+    const all = async (q) => { const { data, error } = await q; if (error) throw error; return data || []; };
+    const [ledger, bids, payments, withdrawals] = await Promise.all([
+      all(supabase.from('market_ledger').select('user_id, bucket, kind, currency, amount')),
+      all(supabase.from('marketplace_bids').select('settle_currency, settle_amount').eq('status', 'active').eq('funding', 'cash')),
+      all(supabase.from('market_payments').select('credit_currency, credit_amount').eq('status', 'paid')),
+      all(supabase.from('market_withdrawals').select('currency, amount, status').in('status', ['pending', 'processing', 'paid'])),
+    ]);
+    const t = {};
+    const cur = (c) => (t[c] ||= { credited: 0, funds: 0, escrow: 0, earnings: 0, payouts_in_progress: 0, paid_out: 0, platform: 0 });
+    for (const p of payments) cur(p.credit_currency).credited += Number(p.credit_amount);
+    for (const l of ledger) {
+      const amt = Number(l.amount);
+      if (l.bucket === 'platform') cur(l.currency).platform += amt;
+      else if (l.bucket === 'funds' && l.user_id) cur(l.currency).funds += amt;
+      else if (l.bucket === 'earnings' && l.user_id) cur(l.currency).earnings += amt;
+    }
+    for (const b of bids) cur(b.settle_currency).escrow += Number(b.settle_amount);
+    for (const w of withdrawals) {
+      if (w.status === 'paid') cur(w.currency).paid_out += Number(w.amount);
+      else cur(w.currency).payouts_in_progress += Number(w.amount);
+    }
+    const r2 = (n) => Math.round(n * 100) / 100;
+    const data = Object.entries(t).map(([currency, v]) => {
+      const owed = v.funds + v.escrow + v.earnings + v.payouts_in_progress;
+      const difference = v.credited - (owed + v.paid_out + v.platform);
+      return {
+        currency, ...Object.fromEntries(Object.entries(v).map(([k, n]) => [k, r2(n)])),
+        owed: r2(owed), hold_at_least: r2(owed), difference: r2(difference), balanced: Math.abs(difference) < 0.01,
+      };
+    }).sort((a, b) => a.currency.localeCompare(b.currency));
+    res.json({ success: true, data: { currencies: data, checked_at: new Date().toISOString() } });
+  } catch (err) { fail(res, err); }
+});
+
 router.get('/admin/withdrawals', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const status = String(req.query.status || 'pending');
