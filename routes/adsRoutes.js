@@ -31,8 +31,8 @@ import {
 
 const router = express.Router();
 const PLACEMENTS = new Set(['home', 'explore', 'feed', 'search']);
-const ITEM_TYPES = new Set(['stories', 'memes', 'puzzles', 'kids_collections', 'music_box', 'podcast_box', 'tv_box']);
-const ITEM_IMAGE = { stories: 'cover_image_url', memes: 'image_url', puzzles: null, kids_collections: 'cover_image_url', music_box: 'cover_image_url', podcast_box: 'cover_image_url', tv_box: 'thumbnail_url' };
+const ITEM_TYPES = new Set(['stories', 'memes', 'puzzles', 'kids_collections', 'music_box', 'podcast_box', 'tv_box', 'books_library']);
+const ITEM_IMAGE = { stories: 'cover_image_url', memes: 'image_url', puzzles: null, kids_collections: 'cover_image_url', music_box: 'cover_image_url', podcast_box: 'cover_image_url', tv_box: 'thumbnail_url', books_library: 'cover_image_url' };
 const FREQUENCY_CAP_PER_DAY = 6;
 const FEATURED_PRIORITY = 50; // Bronze and up take the first slot
 const clean = (value, max) => (typeof value === 'string' ? value.trim().slice(0, max) : '');

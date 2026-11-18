@@ -53,10 +53,15 @@ async function projectView(project, chapters = null) {
     const { data } = await supabase.from('chapters').select('id, published_at').in('id', ids);
     published = Object.fromEntries((data || []).map((r) => [r.id, r.published_at]));
   }
+  const pageIds = list.filter((c) => c.book_page_id).map((c) => c.book_page_id);
+  if (pageIds.length) {
+    const { data } = await supabase.from('book_pages').select('id, created_at').in('id', pageIds);
+    for (const r of data || []) published[r.id] = r.created_at;
+  }
   return {
     ...project,
     chapters: list.map((c) => {
-      const at = c.chapter_id ? published[c.chapter_id] : null;
+      const at = c.chapter_id ? published[c.chapter_id] : c.book_page_id ? published[c.book_page_id] : null;
       const editableUntil = at ? new Date(new Date(at).getTime() + EDIT_DAYS * 86400000).toISOString() : null;
       return {
         ...c,
@@ -297,6 +302,21 @@ router.post('/projects/:id/ideas', authenticateToken, async (req, res) => {
   });
 });
 
+// ── Publish as a story (chapters) or a book (illustrated pages) ─────────────
+router.post('/projects/:id/settings', authenticateToken, async (req, res) => {
+  const project = await loadProject(req.user.id, req.params.id);
+  if (!project) return fail(res, 404, 'Story not found');
+  const publishAs = req.body?.publish_as;
+  if (!['stories', 'books_library'].includes(publishAs)) return fail(res, 400, 'Choose story or book');
+  if (project.continued_from_story && publishAs !== 'stories') return fail(res, 400, 'This continues a published story, so it stays a story.');
+  if ((project.story_id && publishAs === 'books_library') || (project.book_id && publishAs === 'stories')) {
+    return fail(res, 400, 'Part of this is already published, so it can\'t switch now.');
+  }
+  const { data, error } = await supabase.from('story_projects').update({ publish_as: publishAs, updated_at: now() }).eq('id', project.id).select().single();
+  if (error) return fail(res, 500, 'Could not save');
+  res.json({ success: true, data: await projectView(data) });
+});
+
 // ── Edit a chapter (drafts any time; published ones for 30 days) ────────────
 router.patch('/projects/:id/chapters/:cid', authenticateToken, async (req, res) => {
   const project = await loadProject(req.user.id, req.params.id);
@@ -305,6 +325,11 @@ router.patch('/projects/:id/chapters/:cid', authenticateToken, async (req, res) 
   if (!ch) return fail(res, 404, 'Chapter not found');
   const title = String(req.body?.title ?? ch.title).trim().slice(0, 120);
   const content = String(req.body?.content ?? ch.content).trim();
+  let imageUrl = ch.image_url || null;
+  if (req.body?.image_url !== undefined) {
+    imageUrl = req.body.image_url ? String(req.body.image_url) : null;
+    if (imageUrl && !/^https:\/\/[^\s]+$/.test(imageUrl)) return fail(res, 400, 'Invalid picture link');
+  }
   if (!title || content.length < 50) return fail(res, 400, 'A chapter needs a title and some text');
   if (content.length > 60000) return fail(res, 400, 'That chapter is too long (60,000 characters at most)');
 
@@ -314,7 +339,16 @@ router.patch('/projects/:id/chapters/:cid', authenticateToken, async (req, res) 
       .eq('id', ch.chapter_id).eq('author_id', req.user.id);
     if (error) return fail(res, 403, /30 days/.test(error.message) ? 'This chapter was published more than 30 days ago, so it can no longer be edited.' : 'Could not save the published chapter');
   }
-  const { data, error } = await supabase.from('story_project_chapters').update({ title, content, updated_at: now() }).eq('id', ch.id).select().single();
+  if (ch.status === 'published' && ch.book_page_id) {
+    const { data: page } = await supabase.from('book_pages').select('created_at').eq('id', ch.book_page_id).maybeSingle();
+    if (page && Date.now() - new Date(page.created_at).getTime() > EDIT_DAYS * 86400000) {
+      return fail(res, 403, `This page was published more than ${EDIT_DAYS} days ago, so it can no longer be edited.`);
+    }
+    const { error } = await supabase.from('book_pages').update({ heading: title, content, image_url: imageUrl, updated_at: now() })
+      .eq('id', ch.book_page_id).eq('author_id', req.user.id);
+    if (error) return fail(res, 403, /marketplace/.test(error.message) ? error.message : 'Could not save the published page');
+  }
+  const { data, error } = await supabase.from('story_project_chapters').update({ title, content, image_url: imageUrl, updated_at: now() }).eq('id', ch.id).select().single();
   if (error) return fail(res, 500, 'Could not save');
   res.json({ success: true, data });
 });
@@ -347,6 +381,8 @@ router.post('/projects/:id/chapters/:cid/publish', authenticateToken, async (req
   if (ch.status === 'published') return res.json({ success: true, data: await projectView(project, chapters), already: true });
   const earlierDraft = chapters.find((c) => c.number < ch.number && c.status !== 'published');
   if (earlierDraft) return fail(res, 400, `Publish chapter ${earlierDraft.number} first`);
+
+  if (project.publish_as === 'books_library') return publishAsBookPage(req, res, project, chapters, ch);
 
   let storyId = project.story_id;
   let createdStory = null;
@@ -392,12 +428,63 @@ router.post('/projects/:id/chapters/:cid/publish', authenticateToken, async (req
     await supabase.from('story_project_chapters').update({ status: 'published', chapter_id: published.id, updated_at: now() }).eq('id', ch.id);
     const { data: updated } = await supabase.from('story_projects').update({ story_id: storyId, updated_at: now() }).eq('id', project.id).select().single();
     if (createdStory) logGeneration({ userId, feature: 'text', tier: 'publish', success: true, costTokens: creditsToLogUnits(NEW_TITLE_PRICE_USD), inputPrompt: 'story:publish-new-title' });
-    res.json({ success: true, data: await projectView(updated), story_id: storyId, chapter_public_id: published.id });
+    res.json({ success: true, data: await projectView(updated), story_id: storyId, item_type: 'stories', chapter_public_id: published.id });
   } catch (err) {
     console.error('[story] publish failed:', err.message);
     if (createdStory) await supabase.from('stories').delete().eq('id', createdStory.id).then(() => {}, () => {});
     fail(res, 500, 'Could not publish this chapter. Nothing was charged.');
   }
 });
+
+// A book: the first page creates the book (same $1 as any new title), every
+// chapter becomes a page with its heading, text and picture.
+async function publishAsBookPage(req, res, project, chapters, ch) {
+  const userId = req.user.id;
+  let bookId = project.book_id;
+  let createdBook = null;
+  try {
+    if (!bookId) {
+      if (!(await hasCredits(userId, NEW_TITLE_PRICE_USD))) {
+        return fail(res, 402, `Publishing a new book costs $${NEW_TITLE_PRICE_USD.toFixed(2)} in credits (like any new title). Later pages are free.`, { code: 'needs_wallet_credits' });
+      }
+      const plan = project.plan || {};
+      const { data: book, error } = await supabase.from('books_library').insert({
+        author_id: userId, universal_item_type: 'books_library', is_published: true,
+        title: String(req.body?.story_title || plan.title || project.title || 'Untitled book').slice(0, 160),
+        genre: String(req.body?.category || plan.genre || project.genre || '').slice(0, 80) || null,
+        description: String(req.body?.synopsis || plan.synopsis || plan.logline || '').slice(0, 4000) || null,
+        cover_image_url: req.body?.cover_image_url && /^https:\/\//.test(req.body.cover_image_url) ? req.body.cover_image_url : (chapters.find((c) => c.image_url)?.image_url || null),
+      }).select().single();
+      if (error) throw error;
+      createdBook = book;
+      bookId = book.id;
+    } else {
+      const { data: b } = await supabase.from('books_library').select('id').eq('id', bookId).eq('author_id', userId).maybeSingle();
+      if (!b) return fail(res, 400, 'The published book was deleted, so new pages can\'t be added to it.');
+    }
+    const { data: last } = await supabase.from('book_pages').select('page_number').eq('book_id', bookId)
+      .order('page_number', { ascending: false }).limit(1).maybeSingle();
+    const { data: page, error: pErr } = await supabase.from('book_pages').insert({
+      book_id: bookId, author_id: userId, page_number: (last?.page_number || 0) + 1,
+      heading: ch.title, content: ch.content, image_url: ch.image_url || null,
+    }).select().single();
+    if (pErr) throw pErr;
+
+    if (createdBook) {
+      const charged = await chargeCredits(req, NEW_TITLE_PRICE_USD, `New Book: ${createdBook.title}`).catch(() => false);
+      if (!charged) {
+        await supabase.from('books_library').delete().eq('id', createdBook.id);
+        return fail(res, 402, `Publishing a new book costs $${NEW_TITLE_PRICE_USD.toFixed(2)} in credits. Nothing was published.`, { code: 'needs_wallet_credits' });
+      }
+    }
+    await supabase.from('story_project_chapters').update({ status: 'published', book_page_id: page.id, updated_at: now() }).eq('id', ch.id);
+    const { data: updated } = await supabase.from('story_projects').update({ book_id: bookId, updated_at: now() }).eq('id', project.id).select().single();
+    res.json({ success: true, data: await projectView(updated), book_id: bookId, item_type: 'books_library' });
+  } catch (err) {
+    console.error('[story] publish book page failed:', err.message);
+    if (createdBook) await supabase.from('books_library').delete().eq('id', createdBook.id).then(() => {}, () => {});
+    fail(res, 500, 'Could not publish this page. Nothing was charged.');
+  }
+}
 
 export default router;

@@ -13,6 +13,7 @@ export const ITEM_TYPES = {
   music_box:        { table: "music_box",         select: "id,title,author_id,cover_image_url,description,artist_name,play_count,like_count,created_at",   search: ["title", "artist_name"],    img: "cover_image_url", view: "play_count",  like: "like_count",  isContent: true },
   podcast_box:      { table: "podcast_box",       select: "id,title,author_id,cover_image_url,description,host_name,play_count,like_count,created_at",     search: ["title", "host_name"],      img: "cover_image_url", view: "play_count",  like: "like_count",  isContent: true },
   tv_box:           { table: "tv_box",            select: "id,title,author_id,thumbnail_url,description,genre,view_count,like_count,created_at",           search: ["title", "genre"],          img: "thumbnail_url",   view: "view_count",  like: "like_count",  isContent: true },
+  books_library:    { table: "books_library",     select: "id,title,author_id,cover_image_url,description,author_name,genre,page_count,read_count,like_count,created_at", search: ["title", "description", "author_name"], img: "cover_image_url", view: "read_count", like: "like_count", isContent: true },
   profile:          { table: "profiles",          select: "id,full_name,username,bio,avatar_url,created_at",                                                search: ["username", "full_name", "bio"], img: "avatar_url", view: null, like: null, isContent: false },
 };
 
@@ -21,5 +22,5 @@ export const ALL_TYPES = Object.keys(ITEM_TYPES);
 // Author-owned content types only -- excludes "profile" (profiles table has no
 // author_id column; it *is* the owner). Used by comments + post-count endpoints.
 // Assumption: every CONTENT_TYPES table has an "author_id" column (true today for
-// all 7 — review this assumption if that ever changes for a new type).
+// all 8 — review this assumption if that ever changes for a new type).
 export const CONTENT_TYPES = ALL_TYPES.filter((t) => ITEM_TYPES[t].isContent);
