@@ -18,6 +18,16 @@ import express from 'express';
 import { supabase } from '../config/db.js';
 import { authenticateToken } from '../auth.js';
 import { sendWhatsApp, WHATSAPP_MAX_TEXT } from '../utils/whatsappAlert.js';
+import { sendTelegram, findTelegramChat } from '../utils/telegramAlert.js';
+
+// One sender for both channels (migration 076 adds Telegram).
+const channelOf = (c) => (c?.channel === 'telegram' ? 'telegram' : 'whatsapp');
+const alertReady = (c) => (channelOf(c) === 'telegram' ? !!(c?.telegram_bot_token && c?.telegram_chat_id) : !!(c?.whatsapp_number && c?.callmebot_apikey));
+function sendAlert(c, text) {
+  return channelOf(c) === 'telegram'
+    ? sendTelegram({ token: c.telegram_bot_token, chatId: c.telegram_chat_id }, text)
+    : sendWhatsApp({ number: c?.whatsapp_number, apikey: c?.callmebot_apikey }, text);
+}
 
 const router = express.Router();
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -201,6 +211,7 @@ const configView = async (c) => {
   ]);
   return {
     enabled: !!c?.enabled, whatsapp_number: c?.whatsapp_number || '', has_apikey: !!c?.callmebot_apikey,
+    channel: channelOf(c), telegram_connected: !!(c?.telegram_bot_token && c?.telegram_chat_id), telegram_bot: c?.telegram_bot_username || null,
     digest_hour: c?.digest_hour ?? 8, timezone: c?.timezone || 'Africa/Lagos', last_digest_on: c?.last_digest_on || null,
     pending: p.count || 0, failed: f.count || 0, last_error: f.data?.[0]?.wa_error || null,
   };
@@ -220,6 +231,16 @@ router.post('/admin/alerts', authenticateToken, requireAdmin, async (req, res) =
       patch.whatsapp_number = n || null;
     }
     if (b.callmebot_apikey) patch.callmebot_apikey = String(b.callmebot_apikey).trim().slice(0, 100);
+    if (b.channel !== undefined) {
+      if (!['whatsapp', 'telegram'].includes(b.channel)) throw userError('Choose WhatsApp or Telegram');
+      patch.channel = b.channel;
+    }
+    if (b.telegram_bot_token) {
+      // Finds the admin's chat from the message they sent the bot.
+      const f = await findTelegramChat(String(b.telegram_bot_token).trim());
+      if (!f.ok) throw userError(f.error);
+      Object.assign(patch, { telegram_bot_token: String(b.telegram_bot_token).trim(), telegram_chat_id: f.chatId, telegram_bot_username: f.bot, channel: 'telegram' });
+    }
     if (b.digest_hour !== undefined) {
       const h = Number(b.digest_hour);
       if (!Number.isInteger(h) || h < 0 || h > 23) throw userError('Reminder hour must be 0 to 23');
@@ -227,9 +248,9 @@ router.post('/admin/alerts', authenticateToken, requireAdmin, async (req, res) =
     }
     if (b.enabled !== undefined) patch.enabled = !!b.enabled;
     const c = must(await supabase.from('admin_alert_config').update(patch).eq('id', true).select('*').single());
-    if (c.enabled && (!c.whatsapp_number || !c.callmebot_apikey)) {
+    if (c.enabled && !alertReady(c)) {
       await supabase.from('admin_alert_config').update({ enabled: false }).eq('id', true);
-      throw userError('Add the WhatsApp number and CallMeBot key before turning alerts on');
+      throw userError(channelOf(c) === 'telegram' ? 'Connect your Telegram bot before turning alerts on' : 'Add the WhatsApp number and CallMeBot key before turning alerts on');
     }
     res.json({ success: true, data: await configView(c) });
   } catch (err) { fail(res, err); }
@@ -238,8 +259,7 @@ router.post('/admin/alerts', authenticateToken, requireAdmin, async (req, res) =
 router.post('/admin/alerts/test', authenticateToken, requireAdmin, async (_req, res) => {
   try {
     const c = await getConfig();
-    const r = await sendWhatsApp({ number: c?.whatsapp_number, apikey: c?.callmebot_apikey },
-      '✅ Book of Memes: WhatsApp alerts are working. New messages for the admin will arrive here.');
+    const r = await sendAlert(c, `✅ Book of Memes: ${channelOf(c) === 'telegram' ? 'Telegram' : 'WhatsApp'} alerts are working. New messages for the admin will arrive here.`);
     if (!r.ok) throw userError(r.error);
     res.json({ success: true, data: { sent: true } });
   } catch (err) { fail(res, err); }
@@ -317,7 +337,7 @@ async function sendPending(c) {
   for (let i = 0; i < batches.length; i += 1) {
     const b = batches[i];
     if (i) await sleep(4000);
-    const r = await sendWhatsApp({ number: c.whatsapp_number, apikey: c.callmebot_apikey }, (b.text + footer).slice(0, WHATSAPP_MAX_TEXT));
+    const r = await sendAlert(c, (b.text + footer).slice(0, channelOf(c) === 'telegram' ? 4000 : WHATSAPP_MAX_TEXT));
     if (r.ok) {
       await supabase.from('support_messages').update({ wa_status: 'sent', wa_sent_at: new Date().toISOString(), wa_error: null }).in('id', b.ids);
     } else {
@@ -346,7 +366,7 @@ async function sendDigest(c) {
     const lines = open.slice(0, 10).map((t) => `• ${KIND_LABEL[t.kind]}: ${t.subject} (${who(users[t.user_id])}, waiting ${ago(t.last_message_at)})`);
     const text = `⏰ Book of Memes: ${open.length} conversation${open.length === 1 ? '' : 's'} still waiting for you.\n\n${lines.join('\n')}`
       + (open.length > 10 ? `\n…and ${open.length - 10} more.` : '') + '\n\nProfile → Admin inbox';
-    const r = await sendWhatsApp({ number: c.whatsapp_number, apikey: c.callmebot_apikey }, text);
+    const r = await sendAlert(c, text);
     if (!r.ok) { console.error('[support] digest failed:', r.error); return; } // try again next sweep
   }
   await supabase.from('admin_alert_config').update({ last_digest_on: date }).eq('id', true);
@@ -358,7 +378,7 @@ export async function runSupportSweep() {
   sweeping = true;
   try {
     const c = await getConfig();
-    if (!c?.enabled || !c.whatsapp_number || !c.callmebot_apikey) return;
+    if (!c?.enabled || !alertReady(c)) return;
     await sendPending(c);
     await sendDigest(c);
   } finally { sweeping = false; }
