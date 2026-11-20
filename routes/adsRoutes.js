@@ -18,6 +18,7 @@
 //   POST   /api/ads/event                    { campaign_id, kind, placement }  (header x-ad-viewer)
 //   Admin: GET /api/ads/admin/queue, POST /api/ads/admin/review, house ads under /api/ads/admin/house-ads
 import express from 'express';
+import { liveBrandProducts, servedBrand } from './brandRoutes.js';
 import crypto from 'crypto';
 import { supabase } from '../config/db.js';
 import { authenticateToken } from '../auth.js';
@@ -574,10 +575,12 @@ router.get('/serve', async (req, res) => {
         ? 'id, title, body, cta_label, destination_type, destination_url, item_type, item_id, priority, owner_id, profiles:owner_id(username), advertising_campaign_media(position, advertising_media(id, resource_type, format, cloudinary_public_id, delivery_type, status, width, height))'
         : 'id, item_type, item_id, priority')
       .eq('kind', kind).eq('status', 'active').lte('starts_at', now).gt('ends_at', now).contains('placements', [placement]).limit(60);
-    const [ads, boosts, house] = await Promise.all([
+    const [ads, boosts, house, brands] = await Promise.all([
       adLimit ? live('ad') : { data: [] },
       boostLimit ? live('boost') : { data: [] },
       adLimit ? supabase.from('house_ads').select('*').eq('status', 'active').lte('starts_at', now).or(`ends_at.is.null,ends_at.gt.${now}`).contains('placements', [placement]).limit(40) : { data: [] },
+      // Our other products (One Dream, TaskMaster, ...) from the brand network (078).
+      adLimit && placement !== 'content' ? liveBrandProducts({ app: 'bookofmemes', placement }).catch(() => []) : [],
     ]);
     if (ads.error) throw ads.error;
     if (boosts.error) throw boosts.error;
@@ -595,9 +598,13 @@ router.get('/serve', async (req, res) => {
     const pool = [
       ...open.filter((c) => !picked.some((s) => s.paid === c)).map((c) => ({ priority: c.priority, paid: c })),
       ...houseRows.filter((h) => h.mode === 'rotate').map((h) => ({ priority: h.weight, house: h })),
+      ...brands.filter((b) => b.mode === 'rotate').map((b) => ({ priority: b.weight, brand: b })),
     ];
     picked.push(...weightedPick(pool, adLimit - picked.length));
-    if (picked.length < adLimit) picked.push(...weightedPick(houseRows.filter((h) => h.mode !== 'rotate').map((h) => ({ priority: h.weight, house: h })), adLimit - picked.length));
+    if (picked.length < adLimit) picked.push(...weightedPick([
+      ...houseRows.filter((h) => h.mode !== 'rotate').map((h) => ({ priority: h.weight, house: h })),
+      ...brands.filter((b) => b.mode !== 'rotate').map((b) => ({ priority: b.weight, brand: b })),
+    ], adLimit - picked.length));
     if (picked.length < adLimit) picked.push(...weightedPick(adRows.filter((c) => capped.has(c.id)).map((c) => ({ priority: c.priority, paid: c })), adLimit - picked.length));
 
     // Boosted posts: only posts that still exist.
@@ -612,7 +619,7 @@ router.get('/serve', async (req, res) => {
       success: true,
       data: {
         placement,
-        ads: picked.map((s) => (s.house ? servedHouseAd(s.house) : {
+        ads: picked.map((s) => (s.brand ? servedBrand(s.brand, req.get('x-ad-platform') || 'android') : s.house ? servedHouseAd(s.house) : {
           id: s.paid.id, title: s.paid.title, body: s.paid.body,
           cta_label: s.paid.cta_label || (s.paid.destination_type === 'external' ? 'Visit' : 'View'),
           destination: {
@@ -636,6 +643,11 @@ router.post('/event', async (req, res) => {
   if (!/^[0-9a-f-]{36}$/i.test(id) || !['impression', 'click'].includes(kind)) return res.status(400).json({ success: false, error: 'campaign_id and kind are required' });
   const placement = typeof req.body?.placement === 'string' ? req.body.placement : null;
   try {
+    const { data: brand } = await supabase.from('brand_products').select('id').eq('id', id).maybeSingle().then((r) => r, () => ({ data: null }));
+    if (brand) {
+      const { data: rec } = await supabase.rpc('brand_record_event', { p_product_id: id, p_app: 'bookofmemes', p_kind: kind });
+      return res.json({ success: true, data: { recorded: !!rec } });
+    }
     const { data: house } = await supabase.from('house_ads').select('id').eq('id', id).maybeSingle();
     const { data } = house
       ? await supabase.rpc('house_ads_record_event', { p_house_ad_id: id, p_kind: kind, p_placement: placement, p_viewer_key: viewerKey(req) })

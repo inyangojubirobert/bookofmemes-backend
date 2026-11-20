@@ -201,6 +201,69 @@ router.post('/admin/threads/:id/status', authenticateToken, requireAdmin, async 
   } catch (err) { fail(res, err); }
 });
 
+// ── Admin alarm (078) ───────────────────────────────────────────────────────
+// A conversation rings until an admin checks it off (or marks it handled):
+// the app shows a full-screen alarm, and the sweep repeats the Telegram /
+// WhatsApp alert every few minutes. A new message from the user rings again.
+const ringing = (t) => t.status === 'open' && t.last_from === 'user' && (!t.admin_ack_at || new Date(t.admin_ack_at) < new Date(t.last_message_at));
+
+router.get('/admin/alarm', authenticateToken, requireAdmin, async (_req, res) => {
+  try {
+    const rows = must(await supabase.from('support_threads').select('*').eq('status', 'open').eq('last_from', 'user')
+      .order('last_message_at', { ascending: true }).limit(50)).filter(ringing).slice(0, 20);
+    const users = await profilesById(rows.map((r) => r.user_id));
+    const last = {};
+    if (rows.length) {
+      const msgs = must(await supabase.from('support_messages').select('thread_id, body, created_at').in('thread_id', rows.map((r) => r.id))
+        .eq('from_admin', false).order('created_at', { ascending: false }).limit(200));
+      for (const m of msgs) if (!last[m.thread_id]) last[m.thread_id] = m;
+    }
+    res.json({ success: true, data: rows.map((r) => ({
+      id: r.id, kind: r.kind, label: KIND_LABEL[r.kind], subject: r.subject, user: who(users[r.user_id]),
+      last_message: last[r.id]?.body?.slice(0, 300) || '', waiting_since: r.last_message_at, reminders_sent: r.reminder_count || 0,
+    })) });
+  } catch (err) {
+    if (/admin_ack_at|reminder_count/.test(String(err.message))) return res.json({ success: true, data: [] }); // before 078
+    fail(res, err);
+  }
+});
+
+// "Checked": stop ringing for this conversation until the user writes again.
+router.post('/admin/alarm/:id/ack', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    must(await supabase.from('support_threads').update({ admin_ack_at: new Date().toISOString(), admin_ack_by: req.user.id })
+      .eq('id', id(req.params.id)).select('id').single());
+    res.json({ success: true, data: { acknowledged: true } });
+  } catch (err) { fail(res, err); }
+});
+
+async function sendReminders(c) {
+  const every = Math.max(5, c.reminder_minutes || 15);
+  const cap = c.max_reminders || 24;
+  const { data, error } = await supabase.from('support_threads').select('*').eq('status', 'open').eq('last_from', 'user')
+    .order('last_message_at', { ascending: true }).limit(50);
+  if (error) return; // before 078
+  const now = Date.now();
+  const due = (data || []).filter(ringing).filter((t) => {
+    // The first alert goes out with the message itself; reminders follow every `every` minutes.
+    const since = Math.max(new Date(t.last_message_at).getTime(), t.reminder_last_at ? new Date(t.reminder_last_at).getTime() : 0);
+    const count = t.reminder_last_at && new Date(t.reminder_last_at) > new Date(t.last_message_at) ? t.reminder_count : 0;
+    return now - since >= every * 60_000 && count < cap;
+  });
+  if (!due.length) return;
+  const users = await profilesById(due.slice(0, 10).map((t) => t.user_id));
+  const lines = due.slice(0, 10).map((t) => `• ${KIND_LABEL[t.kind]}: ${t.subject} (${who(users[t.user_id])}, waiting ${ago(t.last_message_at)})`);
+  const text = `🔔 Reminder: ${due.length} message${due.length === 1 ? '' : 's'} still waiting for an admin.\n\n${lines.join('\n')}`
+    + (due.length > 10 ? `\n…and ${due.length - 10} more.` : '') + '\n\nOpen Profile → Admin inbox and check them off to stop these reminders.';
+  const r = await sendAlert(c, text);
+  if (!r.ok) { console.error('[support] reminder failed:', r.error); return; }
+  const stamp = new Date().toISOString();
+  for (const t of due) {
+    const count = t.reminder_last_at && new Date(t.reminder_last_at) > new Date(t.last_message_at) ? t.reminder_count : 0;
+    await supabase.from('support_threads').update({ reminder_last_at: stamp, reminder_count: count + 1 }).eq('id', t.id);
+  }
+}
+
 async function getConfig() {
   return must(await supabase.from('admin_alert_config').select('*').eq('id', true).maybeSingle());
 }
@@ -380,6 +443,7 @@ export async function runSupportSweep() {
     const c = await getConfig();
     if (!c?.enabled || !alertReady(c)) return;
     await sendPending(c);
+    await sendReminders(c).catch((e) => console.error('[support] reminders:', e.message));
     await sendDigest(c);
   } finally { sweeping = false; }
 }
