@@ -291,7 +291,7 @@ const status = await creditStatus(userId);
         planName: status.plan.name,
         credits: image.credits,
         image: { limit: Math.floor(status.limit / image.creditCost), remaining: image.remaining, creditCost: image.creditCost, creditCostWithReference: creditsFor('image', { premium, reference: true }), hdCostCredits: IMAGE_HD_COST, watermarkFree: premium, period: 'month' },
-        video: { limit: Math.floor(status.limit / video.creditCost), remaining: video.remaining, creditCost: video.creditCost, creditCostWithReference: creditsFor('video', { premium, reference: true }), hdCostCredits: VIDEO_HD_COST, hdCostCreditsWithReference: VIDEO_HD_REFERENCE_COST, durationSeconds: VIDEO_FREE_DURATION_SECONDS, watermarkFree: premium, period: 'month' },
+        video: { available: premium, needsPlan: !premium, limit: premium ? Math.floor(status.limit / video.creditCost) : 0, remaining: video.remaining, creditCost: video.creditCost, creditCostWithReference: creditsFor('video', { premium, reference: true }), hdCostCredits: VIDEO_HD_COST, hdCostCreditsWithReference: VIDEO_HD_REFERENCE_COST, durationSeconds: VIDEO_FREE_DURATION_SECONDS, watermarkFree: premium, period: 'month' },
       },
     });
   } catch (err) {
@@ -385,6 +385,15 @@ router.post('/video', authenticateToken, async (req, res) => {
   try {
 const status = await creditStatus(userId);
     const premium = status.plan.premiumModels;
+    // Video is a subscription feature (owner's decision, 2026-11-20): Free
+    // users see what the video engine can do on a plan, rather than a cut-down
+    // clip. Neither the monthly pool nor wallet credits unlock it on Free.
+    if (!premium) {
+      return res.status(403).json({
+        success: false, code: 'video_needs_plan',
+        error: 'AI video is part of the Bascardo AI Pro and Business plans. Upgrade to make videos with the full video engine.',
+      });
+    }
     const cost = creditsFor('video', { premium, reference: !!referenceImageUrl });
     const hdCost = referenceImageUrl ? VIDEO_HD_REFERENCE_COST : VIDEO_HD_COST;
 

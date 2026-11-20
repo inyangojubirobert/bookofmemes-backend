@@ -125,6 +125,7 @@ router.get('/config', authenticateToken, async (req, res) => {
         costs: { ideas: creditsFor('contentIdeas', { premium }), image: creditsFor('image', { premium }), video: creditsFor('video', { premium }), video_with_reference: creditsFor('video', { premium, reference: true }), narration_per_minute: creditsFor('narration', { premium, seconds: 60 }) },
         limits: { ideaChars: LIMITS.ideaChars },
         credits: { remaining: status.remaining, limit: status.limit, plan: status.plan.name, resets_at: status.resetsAt },
+        video_available: premium, // video is a Pro/Business feature
       },
     });
   } catch (err) {

@@ -64,7 +64,7 @@ export const ACTION_COSTS = {
   writing: { fast: 1, premium: 1 },           // captions, titles, scripts
   search: { fast: 2, premium: 2 },            // AI search over app content (longer answers)
   image: { fast: 1, premium: 7, premiumWithReference: 12 },
-  video: { fast: 50, premium: 125, premiumWithReference: 310 },
+  video: { fast: 50, premium: 125, premiumWithReference: 310 }, // Pro/Business only: Free can't make video (routes/runwareRoutes.js)
   narrationPerMinute: { fast: 3, premium: 3 },  // both plans use Fish Audio S2.1 Pro (config/aiModels.js)
   // Story Studio (routes/storyRoutes.js, config/storyEngine.js)
   storyPlan: { fast: 4, premium: 4 },         // read the idea/script, plan the story, offer 3 directions
@@ -137,7 +137,7 @@ export function planExamples(p) {
   return {
     research_or_writing: Math.floor(p.monthlyCredits / ACTION_COSTS.research[kind]),
     images: Math.floor(p.monthlyCredits / ACTION_COSTS.image[kind]),
-    videos: Math.floor(p.monthlyCredits / ACTION_COSTS.video[kind]),
+    videos: p.premiumModels ? Math.floor(p.monthlyCredits / ACTION_COSTS.video[kind]) : 0, // video is subscription-only
     narration_minutes: Math.floor(p.monthlyCredits / ACTION_COSTS.narrationPerMinute[kind]),
   };
 }
