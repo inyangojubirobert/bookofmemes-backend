@@ -3,7 +3,7 @@ import crypto from 'crypto';
 import { supabase } from '../config/db.js';
 import { authenticateToken } from '../auth.js';
 import { CREDIT_PRICES, formatCredits, creditsToLogUnits, hasCredits, chargeCredits } from '../utils/credits.js';
-import { creditStatus, spendCredits, creditsView, outOfCreditsMessage } from '../utils/aiCredits.js';
+import { creditStatus, spendCredits, creditsView, outOfCreditsMessage, reserveCredits, commitCredits, releaseCredits } from '../utils/aiCredits.js';
 import { creditsFor } from '../config/aiPlans.js';
 import { logGeneration } from '../utils/aiGenerationLog.js';
 import { saveToGallery } from '../utils/gallery.js';
@@ -151,6 +151,7 @@ router.post('/narrate', authenticateToken, async (req, res) => {
   const userId = req.user.id;
   const seconds = estimateSeconds(text.trim());
   const genStartedAt = Date.now(); // fallback latency source if synthesizeSpeech() itself is never reached
+  let reservation = null;
 
   try {
 const status = await creditStatus(userId);
@@ -163,7 +164,8 @@ const status = await creditStatus(userId);
         return res.status(402).json({ success: false, error: `This would cost ${formatCredits(cost)} in credits. Buy credits in your Wallet and try again.` });
       }
     } else {
-      if (status.remaining < creditCost) {
+      reservation = status.remaining >= creditCost ? await reserveCredits(userId, status.plan, creditCost) : null;
+      if (!reservation) {
         return res.status(429).json({
           success: false,
           error: outOfCreditsMessage(status, creditCost, ' Try HD (paid with wallet credits) or shorten the text.'),
@@ -178,13 +180,15 @@ const status = await creditStatus(userId);
     if (hd) {
       charged = await chargeCredits(req, cost, 'Bascardo AI Content — HD narration');
     } else {
-      await spendCredits(userId, creditCost);
+      await commitCredits(userId, reservation);
+      reservation = null;
     }
 
     logGeneration({ userId, feature: 'voice', model: modelUsed, provider: 'runware', requestId: taskUUID, durationSeconds: seconds, inputPrompt: text.trim(), tier: hd ? 'hd' : (premium ? 'premium_free' : 'free'), costTokens: charged ? creditsToLogUnits(cost) : 0, success: true, outputUrl: audioUrl, latencyMs, providerCost, providerHttpStatus });
     saveToGallery({ userId, kind: 'audio', url: audioUrl, feature: 'narration', prompt: text.trim(), model: modelUsed, durationSeconds: seconds });
     res.json({ success: true, data: { audioUrl, hd, charged, estimatedSeconds: seconds } });
   } catch (err) {
+    await releaseCredits(reservation);
     console.error('Voice narration error:', err);
     logGeneration({ userId, feature: 'voice', model: hd ? AI_MODELS.VOICE.PREMIUM : AI_MODELS.VOICE.FREE, provider: 'runware', durationSeconds: seconds, inputPrompt: text.trim(), tier: hd ? 'hd' : 'free', success: false, errorMessage: err.message, latencyMs: Date.now() - genStartedAt, providerHttpStatus: err.providerHttpStatus ?? null });
     res.status(500).json({ success: false, error: err.message || 'Voice narration failed' });

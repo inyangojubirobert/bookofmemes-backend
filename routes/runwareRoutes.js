@@ -4,7 +4,8 @@ import { v2 as cloudinary } from 'cloudinary';
 import { supabase } from '../config/db.js';
 import { authenticateToken } from '../auth.js';
 import { CREDIT_PRICES, formatCredits, creditsToLogUnits, hasCredits, chargeCredits } from '../utils/credits.js';
-import { creditStatus, spendCredits, creditsView, outOfCreditsMessage } from '../utils/aiCredits.js';
+import { creditStatus, spendCredits, creditsView, outOfCreditsMessage, reserveCredits, commitCredits, releaseCredits } from '../utils/aiCredits.js';
+import { registerJobKind, createJob, waitForJob, publicJob, jobsAvailable } from '../utils/studioJobs.js';
 import { creditsFor } from '../config/aiPlans.js';
 import { logGeneration } from '../utils/aiGenerationLog.js';
 import { saveToGallery } from '../utils/gallery.js';
@@ -320,6 +321,7 @@ router.post('/image', authenticateToken, async (req, res) => {
 
   const userId = req.user.id;
   const genStartedAt = Date.now(); // fallback latency source if generateImage() itself is never reached
+  let reservation = null;
 
   try {
 const status = await creditStatus(userId);
@@ -331,7 +333,9 @@ const status = await creditStatus(userId);
         return res.status(402).json({ success: false, error: `HD generation costs ${formatCredits(IMAGE_HD_COST)} in credits. Buy credits in your Wallet and try again.` });
       }
     } else {
-      if (status.remaining < cost) {
+      // Held atomically before the provider is called (migration 073).
+      reservation = status.remaining >= cost ? await reserveCredits(userId, status.plan, cost) : null;
+      if (!reservation) {
         return res.status(429).json({ success: false, error: outOfCreditsMessage(status, cost, ' Try HD (paid with wallet credits) or wait for next month.') });
       }
     }
@@ -344,13 +348,15 @@ const status = await creditStatus(userId);
     if (hd) {
       charged = await chargeCredits(req, IMAGE_HD_COST, 'Bascardo AI Content — HD image');
     } else {
-      await spendCredits(userId, cost);
+      await commitCredits(userId, reservation);
+      reservation = null;
     }
 
     logGeneration({ userId, feature: 'image', model: modelUsed, provider: 'runware', requestId: taskUUID, inputPrompt: prompt.trim(), tier: hd ? 'hd' : (premium ? 'premium_free' : 'free'), costTokens: charged ? creditsToLogUnits(IMAGE_HD_COST) : 0, success: true, outputUrl: imageUrl, latencyMs, providerCost, providerHttpStatus });
     saveToGallery({ userId, kind: 'image', url: imageUrl, feature: 'image', prompt: prompt.trim(), model: modelUsed });
     res.json({ success: true, data: { imageUrl, hd, charged, watermarked: !skipWatermark } });
   } catch (err) {
+    await releaseCredits(reservation);
     console.error('Runware image generate error:', err);
     logGeneration({ userId, feature: 'image', model: hd ? AI_MODELS.IMAGE.PREMIUM : AI_MODELS.IMAGE.FREE, provider: 'runware', inputPrompt: prompt.trim(), tier: hd ? 'hd' : 'free', success: false, errorMessage: err.message, latencyMs: Date.now() - genStartedAt, providerHttpStatus: err.providerHttpStatus ?? null });
     res.status(500).json({ success: false, error: err.message || 'AI image generation failed' });
@@ -381,6 +387,7 @@ router.post('/video', authenticateToken, async (req, res) => {
 
   const userId = req.user.id;
   const genStartedAt = Date.now(); // fallback latency source if generateVideo() itself is never reached
+  let reservation = null;
 
   try {
 const status = await creditStatus(userId);
@@ -402,9 +409,31 @@ const status = await creditStatus(userId);
         return res.status(402).json({ success: false, error: `HD video costs ${formatCredits(hdCost)} in credits. Buy credits in your Wallet and try again.` });
       }
     } else {
-      if (status.remaining < cost) {
+      reservation = status.remaining >= cost ? await reserveCredits(userId, status.plan, cost, null, 30) : null;
+      if (!reservation) {
         return res.status(429).json({ success: false, error: outOfCreditsMessage(status, cost, ' Try HD (paid with wallet credits) or wait for next month.') });
       }
+    }
+
+    // As a background job (migration 073): the clip is finished, saved to the
+    // Gallery and charged even if the phone disconnects or this server restarts.
+    if (jobsAvailable()) {
+      const rid = String(req.body?.request_id || '');
+      const projectKind = typeof req.body?.project_kind === 'string' ? req.body.project_kind.slice(0, 20) : null;
+      const projectId = /^[0-9a-f-]{36}$/i.test(String(req.body?.project_id || '')) ? req.body.project_id : null;
+      const { job, existed } = await createJob({
+        userId, kind: 'video_clip', requestId: /^[A-Za-z0-9_-]{8,80}$/.test(rid) ? `video:${rid}` : `video:${crypto.randomUUID()}`,
+        input: { prompt: prompt.trim(), hd, premium, referenceImageUrl, tier: status.plan.id, role: req.body?.role || null },
+        projectKind, projectId, reservation: hd ? null : reservation, credits: hd ? 0 : cost,
+        memory: hd ? { authorization: req.headers.authorization, hdCost } : null,
+      });
+      if (existed) await releaseCredits(reservation); // a retry of a job that already exists holds nothing new
+      reservation = null;
+      if (req.body?.async) return res.status(202).json({ success: true, data: { job: publicJob(job) } });
+      const settled = await waitForJob(job.id);
+      if (settled?.status === 'done') return res.json({ success: true, data: { ...settled.result, job_id: job.id } });
+      if (settled?.status === 'failed') return res.status(500).json({ success: false, error: settled.error || 'AI video generation failed. You were not charged.' });
+      return res.status(202).json({ success: true, data: { job: publicJob(settled), pending: true, message: 'Still making your video. It will be in your Gallery when it is ready.' } });
     }
 
     const { videoUrl: rawVideoUrl, taskUUID, modelUsed, latencyMs, providerCost, providerHttpStatus } = await generateVideo(prompt.trim(), { hd, premium, referenceImageUrl });
@@ -415,17 +444,62 @@ const status = await creditStatus(userId);
     if (hd) {
       charged = await chargeCredits(req, hdCost, 'Bascardo AI Content — HD video');
     } else {
-      await spendCredits(userId, cost);
+      await commitCredits(userId, reservation);
+      reservation = null;
     }
 
     logGeneration({ userId, feature: 'video', model: modelUsed, provider: 'runware', requestId: taskUUID, inputPrompt: prompt.trim(), durationSeconds: VIDEO_FREE_DURATION_SECONDS, tier: hd ? 'hd' : (premium ? 'premium_free' : 'free'), costTokens: charged ? creditsToLogUnits(hdCost) : 0, success: true, outputUrl: videoUrl, latencyMs, providerCost, providerHttpStatus });
     saveToGallery({ userId, kind: 'video', url: videoUrl, feature: 'video', prompt: prompt.trim(), model: modelUsed, durationSeconds: VIDEO_FREE_DURATION_SECONDS });
     res.json({ success: true, data: { videoUrl, hd, charged, watermarked: !skipWatermark } });
   } catch (err) {
+    await releaseCredits(reservation);
     console.error('Runware video generate error:', err);
     logGeneration({ userId, feature: 'video', model: hd ? AI_MODELS.VIDEO.PREMIUM : AI_MODELS.VIDEO.FREE, provider: 'runware', inputPrompt: prompt.trim(), tier: hd ? 'hd' : 'free', success: false, errorMessage: err.message, latencyMs: Date.now() - genStartedAt, providerHttpStatus: err.providerHttpStatus ?? null });
     res.status(500).json({ success: false, error: err.message || 'AI video generation failed' });
   }
+});
+
+// ── Video clip as a background job (utils/studioJobs.js) ────────────────────
+registerJobKind('video_clip', {
+  pollEveryMs: 5000,
+  async start(job) {
+    const { prompt, hd, premium, referenceImageUrl } = job.input;
+    const task = buildVideoTask(prompt, { hd, premium, referenceImageUrl });
+    // Keep our own task id: polling resumes with it after a restart.
+    await callRunwareTasks([{ ...task, taskUUID: job.provider_task_id || task.taskUUID }]);
+    return { provider: 'runware', providerTaskId: task.taskUUID, model: task.model };
+  },
+  async poll(job) {
+    const { data } = await callRunwareTasks([{ taskType: 'getResponse', taskUUID: job.provider_task_id }]);
+    const [r] = data;
+    if (r?.status === 'success') return { result: r };
+    if (r?.status === 'error') throw Object.assign(new Error(r?.errorMessage || 'Video generation failed'), { permanent: true });
+    return null;
+  },
+  async finish(job, r, ctx) {
+    const { prompt, hd, premium, referenceImageUrl, tier, role } = job.input;
+    if (!r?.videoURL) throw Object.assign(new Error('Runware returned no video'), { permanent: true });
+    const model = hd || premium ? AI_MODELS.VIDEO.PREMIUM : AI_MODELS.VIDEO.FREE;
+    const videoUrl = hd || premium ? r.videoURL : await watermarkVideo(r.videoURL);
+    let charged = false;
+    if (hd) {
+      // Wallet charge needs the user's session, kept only in memory. After a
+      // restart it's gone: the clip is then delivered uncharged (our loss,
+      // never the user's), and logged.
+      if (ctx.authorization) charged = await chargeCredits({ headers: { authorization: ctx.authorization } }, ctx.hdCost, 'Bascardo AI Content — HD video').catch(() => false);
+      if (!charged) console.warn(`[jobs] HD video ${job.id} delivered without a wallet charge`);
+    }
+    const latencyMs = Date.now() - new Date(job.created_at).getTime();
+    logGeneration({ userId: job.user_id, feature: 'video', model, provider: 'runware', requestId: job.provider_task_id, inputPrompt: prompt, durationSeconds: VIDEO_FREE_DURATION_SECONDS, tier: hd ? 'hd' : (premium ? 'premium_free' : tier || 'free'), costTokens: charged ? creditsToLogUnits(ctx.hdCost) : 0, success: true, outputUrl: videoUrl, latencyMs, providerCost: r.cost ?? null });
+    saveToGallery({
+      userId: job.user_id, kind: 'video', url: videoUrl, feature: 'video', prompt, model, durationSeconds: VIDEO_FREE_DURATION_SECONDS,
+      projectKind: job.project_kind, projectId: job.project_id, role: role || null, provider: 'runware', providerCost: r.cost ?? null, credits: job.credits, jobId: job.id,
+    });
+    return { videoUrl, hd, charged, watermarked: !(hd || premium), referenceImageUrl: referenceImageUrl || null };
+  },
+  failed(job, err) {
+    logGeneration({ userId: job.user_id, feature: 'video', model: job.input?.hd || job.input?.premium ? AI_MODELS.VIDEO.PREMIUM : AI_MODELS.VIDEO.FREE, provider: 'runware', inputPrompt: job.input?.prompt, tier: job.input?.hd ? 'hd' : 'free', success: false, errorMessage: err.message, latencyMs: Date.now() - new Date(job.created_at).getTime() });
+  },
 });
 
 export default router;

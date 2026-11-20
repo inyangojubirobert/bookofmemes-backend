@@ -16,7 +16,8 @@
 import express from 'express';
 import { supabase } from '../config/db.js';
 import { authenticateToken } from '../auth.js';
-import { creditStatus, spendCredits, outOfCreditsMessage } from '../utils/aiCredits.js';
+import { creditStatus } from '../utils/aiCredits.js';
+import { runChargedStep } from '../utils/studioSteps.js';
 import { creditsFor } from '../config/aiPlans.js';
 import { chargeCredits, hasCredits, creditsToLogUnits } from '../utils/credits.js';
 import { logGeneration } from '../utils/aiGenerationLog.js';
@@ -27,7 +28,6 @@ import {
 
 const router = express.Router();
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const REQ_ID = /^[A-Za-z0-9_-]{8,80}$/;
 const EDIT_DAYS = 30;
 const NEW_TITLE_PRICE_USD = 1; // same as posting any new title in Add Content
 
@@ -74,59 +74,16 @@ async function projectView(project, chapters = null) {
   };
 }
 
-// ── Charged AI step with idempotency ────────────────────────────────────────
-async function runCharged(req, res, { kind, action, projectId = null }, work) {
-  const userId = req.user.id;
-  const requestId = String(req.body?.request_id || '');
-  if (!REQ_ID.test(requestId)) return fail(res, 400, 'Missing request id. Please update the app.');
-
-  // Same request again: hand back what it produced, without charging again.
-  const { data: prior } = await supabase.from('story_ai_requests').select('*').eq('request_id', requestId).maybeSingle();
-  if (prior) {
-    if (prior.user_id !== userId) return fail(res, 409, 'Request id already used.');
-    if (prior.status === 'done') return res.json({ success: true, data: prior.response, replayed: true });
-    if (prior.status === 'running' && Date.now() - new Date(prior.created_at).getTime() < 5 * 60000) {
-      return fail(res, 409, 'Bascardo AI is still working on this. Give it a moment.');
-    }
-  }
-  // One step at a time per project.
-  if (projectId) {
-    const { data: busy } = await supabase.from('story_ai_requests').select('request_id')
-      .eq('project_id', projectId).eq('status', 'running').neq('request_id', requestId)
-      .gt('created_at', new Date(Date.now() - 5 * 60000).toISOString()).limit(1);
-    if (busy?.length) return fail(res, 409, 'Bascardo AI is already working on this story. Give it a moment.');
-  }
-
-  const status = await creditStatus(userId);
-  const cost = creditsFor(action, { premium: status.plan.premiumModels });
-  if (status.remaining < cost) {
-    return fail(res, 402, outOfCreditsMessage(status, cost, ' Your credits renew on the 1st, or get more with a Bascardo AI plan.'), {
-      code: 'out_of_credits', credits: { remaining: status.remaining, limit: status.limit, cost, plan: status.plan.name },
-    });
-  }
-
-  const row = { request_id: requestId, user_id: userId, project_id: projectId, kind, status: 'running', credits: cost, error: null, response: null, created_at: now(), finished_at: null };
-  const { error: lockErr } = prior
-    ? await supabase.from('story_ai_requests').update(row).eq('request_id', requestId)
-    : await supabase.from('story_ai_requests').insert(row);
-  if (lockErr) return fail(res, 409, 'Bascardo AI is already working on this. Give it a moment.');
-
-  const started = Date.now();
-  try {
-    const result = await work(cost);
-    // Saved first, then charged: a failure above never costs credits.
-    await spendCredits(userId, cost);
-    const after = await creditStatus(userId).catch(() => null);
-    const data = { ...result, credits: after ? { remaining: after.remaining, limit: after.limit, spent: cost } : { spent: cost } };
-    await supabase.from('story_ai_requests').update({ status: 'done', response: data, finished_at: now(), project_id: result?.project?.id || projectId }).eq('request_id', requestId);
-    logGeneration({ userId, feature: 'text', model: STORY_MODEL, provider: 'anthropic', tier: status.plan.id, success: true, requestId, inputPrompt: `story:${kind} ${PROMPT_VERSION}`, latencyMs: Date.now() - started });
-    return res.json({ success: true, data });
-  } catch (err) {
-    console.error(`[story] ${kind} failed:`, err.message);
-    await supabase.from('story_ai_requests').update({ status: 'failed', error: String(err.message).slice(0, 500), finished_at: now() }).eq('request_id', requestId);
-    logGeneration({ userId, feature: 'text', model: STORY_MODEL, provider: 'anthropic', tier: status.plan.id, success: false, requestId, inputPrompt: `story:${kind} ${PROMPT_VERSION}`, errorMessage: err.message, latencyMs: Date.now() - started });
-    return fail(res, err instanceof StoryError ? err.status : 500, err instanceof StoryError ? err.message : 'Bascardo AI could not finish this. Please try again (you were not charged).');
-  }
+// ── Charged AI step (shared contract: utils/studioSteps.js) ────────────────
+function runCharged(req, res, { kind, action, projectId = null }, work) {
+  return runChargedStep(req, res, {
+    ledger: 'story_ai_requests', kind, action, projectId, subject: 'this story',
+    log: { feature: 'text', model: STORY_MODEL, provider: 'anthropic', prompt: `story:${kind} ${PROMPT_VERSION}` },
+    isKnownError: (err) => err instanceof StoryError,
+  }, async (status) => {
+    const result = await work(creditsFor(action, { premium: status.plan.premiumModels }));
+    return { data: result, projectId: result?.project?.id || projectId };
+  });
 }
 
 // ── Setup info for the app ──────────────────────────────────────────────────

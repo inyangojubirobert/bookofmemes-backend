@@ -18,9 +18,9 @@
 import express from 'express';
 import { supabase } from '../config/db.js';
 import { authenticateToken } from '../auth.js';
-import { creditStatus, spendCredits, outOfCreditsMessage } from '../utils/aiCredits.js';
+import { creditStatus } from '../utils/aiCredits.js';
+import { runChargedStep } from '../utils/studioSteps.js';
 import { creditsFor } from '../config/aiPlans.js';
-import { logGeneration } from '../utils/aiGenerationLog.js';
 import { saveToGallery } from '../utils/gallery.js';
 import { narrateScript, speakableText, estimateSeconds, MAX_SCRIPT_CHARS } from '../utils/podcastNarration.js';
 import {
@@ -30,7 +30,6 @@ import {
 
 const router = express.Router();
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const REQ_ID = /^[A-Za-z0-9_-]{8,80}$/;
 const HTTPS = /^https:\/\/[^\s]+$/;
 // Claude Haiku 4.5 list price, for the real cost logged with every step.
 const USD_PER_TOKEN = { input: 1 / 1e6, output: 5 / 1e6 };
@@ -52,63 +51,22 @@ function addUsage(total, usage) {
   return { input: total.input + (usage.input_tokens || 0), output: total.output + (usage.output_tokens || 0) };
 }
 
-// ── Charged AI step with idempotency (same contract as the Story Studio) ────
-async function runCharged(req, res, { kind, action, itemType, projectId = null, costOpts = {}, log = {} }, work) {
-  const userId = req.user.id;
-  const requestId = String(req.body?.request_id || '');
-  if (!REQ_ID.test(requestId)) return fail(res, 400, 'Missing request id. Please update the app.');
-
-  const { data: prior } = await supabase.from('content_ai_requests').select('*').eq('request_id', requestId).maybeSingle();
-  if (prior) {
-    if (prior.user_id !== userId) return fail(res, 409, 'Request id already used.');
-    if (prior.status === 'done') return res.json({ success: true, data: prior.response, replayed: true });
-    if (prior.status === 'running' && Date.now() - new Date(prior.created_at).getTime() < 5 * 60000) {
-      return fail(res, 409, 'Bascardo AI is still working on this. Give it a moment.');
-    }
-  }
-  if (projectId) {
-    const { data: busy } = await supabase.from('content_ai_requests').select('request_id')
-      .eq('project_id', projectId).eq('status', 'running').neq('request_id', requestId)
-      .gt('created_at', new Date(Date.now() - 5 * 60000).toISOString()).limit(1);
-    if (busy?.length) return fail(res, 409, 'Bascardo AI is already working on this post. Give it a moment.');
-  }
-
-  const status = await creditStatus(userId);
-  const cost = creditsFor(action, { premium: status.plan.premiumModels, ...costOpts });
-  if (status.remaining < cost) {
-    return fail(res, 402, outOfCreditsMessage(status, cost, ' Your credits renew on the 1st, or get more with a Bascardo AI plan.'), {
-      code: 'out_of_credits', credits: { remaining: status.remaining, limit: status.limit, cost, plan: status.plan.name },
-    });
-  }
-
-  const row = { request_id: requestId, user_id: userId, project_id: projectId, item_type: itemType, kind, status: 'running', credits: cost, error: null, response: null, input_tokens: null, output_tokens: null, created_at: now(), finished_at: null };
-  const { error: lockErr } = prior
-    ? await supabase.from('content_ai_requests').update(row).eq('request_id', requestId)
-    : await supabase.from('content_ai_requests').insert(row);
-  if (lockErr) return fail(res, 409, 'Bascardo AI is already working on this. Give it a moment.');
-
-  const started = Date.now();
-  const prompt = `content:${itemType}:${kind} ${PROMPT_VERSION}`;
-  try {
-    const { view, usage = { input: 0, output: 0 }, providerCost: workCost = null, durationSeconds = 0 } = await work(status);
-    // Saved first, then charged: a failure above never costs credits.
-    await spendCredits(userId, cost);
-    const after = await creditStatus(userId).catch(() => null);
-    const data = { ...view, credits: after ? { remaining: after.remaining, limit: after.limit, spent: cost } : { spent: cost } };
-    const providerCost = workCost ?? Number((usage.input * USD_PER_TOKEN.input + usage.output * USD_PER_TOKEN.output).toFixed(6));
-    await supabase.from('content_ai_requests').update({
-      status: 'done', response: data, finished_at: now(), project_id: view?.project?.id || projectId,
-      input_tokens: usage.input, output_tokens: usage.output,
-    }).eq('request_id', requestId);
-    logGeneration({ userId, feature: 'text', model: CONTENT_MODEL, provider: 'anthropic', ...log, tier: status.plan.id, success: true, requestId, inputPrompt: prompt, latencyMs: Date.now() - started, providerCost, durationSeconds, outputUrl: view?.audio_url || null });
-    return res.json({ success: true, data });
-  } catch (err) {
-    console.error(`[content] ${itemType} ${kind} failed:`, err.message);
-    await supabase.from('content_ai_requests').update({ status: 'failed', error: String(err.message).slice(0, 500), finished_at: now() }).eq('request_id', requestId);
-    logGeneration({ userId, feature: 'text', model: CONTENT_MODEL, provider: 'anthropic', ...log, tier: status.plan.id, success: false, requestId, inputPrompt: prompt, errorMessage: err.message, latencyMs: Date.now() - started });
-    const known = err instanceof ContentError || err.status === 400;
-    return fail(res, known ? err.status : 500, known ? err.message : 'Bascardo AI could not finish this. Please try again (you were not charged).');
-  }
+// ── Charged AI step (shared contract: utils/studioSteps.js) ────────────────
+// work(status) returns { view, usage, providerCost?, durationSeconds? }.
+function runCharged(req, res, { kind, action, itemType, projectId = null, costOpts = {}, log = {} }, work) {
+  return runChargedStep(req, res, {
+    ledger: 'content_ai_requests', kind, action, costOpts, projectId, subject: 'this post',
+    ledgerExtra: { item_type: itemType }, recordTokens: true,
+    log: { feature: 'text', model: CONTENT_MODEL, provider: 'anthropic', prompt: `content:${itemType}:${kind} ${PROMPT_VERSION}`, ...log },
+    isKnownError: (err) => err instanceof ContentError || err.status === 400,
+  }, async (status) => {
+    const { view, usage = { input: 0, output: 0 }, providerCost = null, durationSeconds = 0 } = await work(status);
+    return {
+      data: view, usage, durationSeconds, outputUrl: view?.audio_url || null,
+      providerCost: providerCost ?? Number((usage.input * USD_PER_TOKEN.input + usage.output * USD_PER_TOKEN.output).toFixed(6)),
+      projectId: view?.project?.id || projectId,
+    };
+  });
 }
 
 // ── Setup info for the app ──────────────────────────────────────────────────

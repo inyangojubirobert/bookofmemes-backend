@@ -27,6 +27,8 @@ import notificationRoutes from "./routes/notificationRoutes.js";
 import storyRoutes from "./routes/storyRoutes.js";
 import contentStudioRoutes from "./routes/contentStudioRoutes.js";
 import galleryRoutes from "./routes/galleryRoutes.js";
+import studioJobRoutes from "./routes/studioJobRoutes.js";
+import { startJobRunner } from "./utils/studioJobs.js";
 import supportRoutes, { startSupportAlertTimer } from "./routes/supportRoutes.js";
 
 
@@ -67,6 +69,8 @@ app.use("/api/notifications", notificationRoutes); // in-app notifications inbox
 app.use("/api/story", storyRoutes); // Bascardo Story Studio (migration 064)
 app.use("/api/content-studio", contentStudioRoutes); // Bascardo Content Studio (migration 071)
 app.use("/api/gallery", galleryRoutes); // Bascardo Gallery (migration 072)
+app.use("/api/studio", studioJobRoutes); // background jobs for long media work (migration 073)
+startJobRunner();
 app.use("/api/support", supportRoutes); // admin inbox + WhatsApp alerts (migration 069)
 
 // AI features
