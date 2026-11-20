@@ -6,6 +6,7 @@ import { CREDIT_PRICES, formatCredits, creditsToLogUnits, hasCredits, chargeCred
 import { creditStatus, spendCredits, creditsView, outOfCreditsMessage } from '../utils/aiCredits.js';
 import { creditsFor } from '../config/aiPlans.js';
 import { logGeneration } from '../utils/aiGenerationLog.js';
+import { saveToGallery } from '../utils/gallery.js';
 import { AI_MODELS, AI_VOICE_PRESETS } from '../config/aiModels.js';
 
 /*
@@ -181,6 +182,7 @@ const status = await creditStatus(userId);
     }
 
     logGeneration({ userId, feature: 'voice', model: modelUsed, provider: 'runware', requestId: taskUUID, durationSeconds: seconds, inputPrompt: text.trim(), tier: hd ? 'hd' : (premium ? 'premium_free' : 'free'), costTokens: charged ? creditsToLogUnits(cost) : 0, success: true, outputUrl: audioUrl, latencyMs, providerCost, providerHttpStatus });
+    saveToGallery({ userId, kind: 'audio', url: audioUrl, feature: 'narration', prompt: text.trim(), model: modelUsed, durationSeconds: seconds });
     res.json({ success: true, data: { audioUrl, hd, charged, estimatedSeconds: seconds } });
   } catch (err) {
     console.error('Voice narration error:', err);

@@ -21,6 +21,7 @@ import { authenticateToken } from '../auth.js';
 import { creditStatus, spendCredits, outOfCreditsMessage } from '../utils/aiCredits.js';
 import { creditsFor } from '../config/aiPlans.js';
 import { logGeneration } from '../utils/aiGenerationLog.js';
+import { saveToGallery } from '../utils/gallery.js';
 import { narrateScript, speakableText, estimateSeconds, MAX_SCRIPT_CHARS } from '../utils/podcastNarration.js';
 import {
   proposeConcepts, writeDraft, draftToForm, publicTypes, ContentError,
@@ -121,7 +122,7 @@ router.get('/config', authenticateToken, async (req, res) => {
       success: true,
       data: {
         types,
-        costs: { ideas: creditsFor('contentIdeas', { premium }), image: creditsFor('image', { premium }), video: creditsFor('video', { premium }), narration_per_minute: creditsFor('narration', { premium, seconds: 60 }) },
+        costs: { ideas: creditsFor('contentIdeas', { premium }), image: creditsFor('image', { premium }), video: creditsFor('video', { premium }), video_with_reference: creditsFor('video', { premium, reference: true }), narration_per_minute: creditsFor('narration', { premium, seconds: 60 }) },
         limits: { ideaChars: LIMITS.ideaChars },
         credits: { remaining: status.remaining, limit: status.limit, plan: status.plan.name, resets_at: status.resetsAt },
       },
@@ -288,6 +289,7 @@ router.post('/projects/:id/narrate', authenticateToken, async (req, res) => {
   }, async (status) => {
     const r = await narrateScript(project.draft.script, { useHdModel: status.plan.premiumModels, userId: req.user.id });
     const media = { ...(project.media || {}), audio_url: r.audioUrl, audio_seconds: r.seconds };
+    saveToGallery({ userId: req.user.id, kind: 'audio', url: r.audioUrl, feature: 'podcast_narration', prompt: project.draft.title || null, model: r.model, durationSeconds: r.seconds });
     const { data: updated, error } = await supabase.from('content_projects').update({ media, updated_at: now() }).eq('id', project.id).select().single();
     if (error) throw error;
     return { view: { project: projectView(updated), audio_url: r.audioUrl }, providerCost: r.providerCost, durationSeconds: r.seconds };

@@ -26,6 +26,7 @@ import subscriptionRoutes from "./routes/subscriptionRoutes.js";
 import notificationRoutes from "./routes/notificationRoutes.js";
 import storyRoutes from "./routes/storyRoutes.js";
 import contentStudioRoutes from "./routes/contentStudioRoutes.js";
+import galleryRoutes from "./routes/galleryRoutes.js";
 import supportRoutes, { startSupportAlertTimer } from "./routes/supportRoutes.js";
 
 
@@ -65,6 +66,7 @@ app.use("/api/subscriptions", subscriptionRoutes); // Bascardo AI plans as Googl
 app.use("/api/notifications", notificationRoutes); // in-app notifications inbox
 app.use("/api/story", storyRoutes); // Bascardo Story Studio (migration 064)
 app.use("/api/content-studio", contentStudioRoutes); // Bascardo Content Studio (migration 071)
+app.use("/api/gallery", galleryRoutes); // Bascardo Gallery (migration 072)
 app.use("/api/support", supportRoutes); // admin inbox + WhatsApp alerts (migration 069)
 
 // AI features

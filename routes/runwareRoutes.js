@@ -7,6 +7,7 @@ import { CREDIT_PRICES, formatCredits, creditsToLogUnits, hasCredits, chargeCred
 import { creditStatus, spendCredits, creditsView, outOfCreditsMessage } from '../utils/aiCredits.js';
 import { creditsFor } from '../config/aiPlans.js';
 import { logGeneration } from '../utils/aiGenerationLog.js';
+import { saveToGallery } from '../utils/gallery.js';
 import { AI_MODELS } from '../config/aiModels.js';
 
 /*
@@ -347,6 +348,7 @@ const status = await creditStatus(userId);
     }
 
     logGeneration({ userId, feature: 'image', model: modelUsed, provider: 'runware', requestId: taskUUID, inputPrompt: prompt.trim(), tier: hd ? 'hd' : (premium ? 'premium_free' : 'free'), costTokens: charged ? creditsToLogUnits(IMAGE_HD_COST) : 0, success: true, outputUrl: imageUrl, latencyMs, providerCost, providerHttpStatus });
+    saveToGallery({ userId, kind: 'image', url: imageUrl, feature: 'image', prompt: prompt.trim(), model: modelUsed });
     res.json({ success: true, data: { imageUrl, hd, charged, watermarked: !skipWatermark } });
   } catch (err) {
     console.error('Runware image generate error:', err);
@@ -408,6 +410,7 @@ const status = await creditStatus(userId);
     }
 
     logGeneration({ userId, feature: 'video', model: modelUsed, provider: 'runware', requestId: taskUUID, inputPrompt: prompt.trim(), durationSeconds: VIDEO_FREE_DURATION_SECONDS, tier: hd ? 'hd' : (premium ? 'premium_free' : 'free'), costTokens: charged ? creditsToLogUnits(hdCost) : 0, success: true, outputUrl: videoUrl, latencyMs, providerCost, providerHttpStatus });
+    saveToGallery({ userId, kind: 'video', url: videoUrl, feature: 'video', prompt: prompt.trim(), model: modelUsed, durationSeconds: VIDEO_FREE_DURATION_SECONDS });
     res.json({ success: true, data: { videoUrl, hd, charged, watermarked: !skipWatermark } });
   } catch (err) {
     console.error('Runware video generate error:', err);
