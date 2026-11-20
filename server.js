@@ -25,6 +25,8 @@ import adsRoutes from "./routes/adsRoutes.js";
 import subscriptionRoutes from "./routes/subscriptionRoutes.js";
 import notificationRoutes from "./routes/notificationRoutes.js";
 import storyRoutes from "./routes/storyRoutes.js";
+import contentStudioRoutes from "./routes/contentStudioRoutes.js";
+import supportRoutes, { startSupportAlertTimer } from "./routes/supportRoutes.js";
 
 
 dotenv.config();
@@ -62,6 +64,8 @@ app.use("/api/ads", adsRoutes);            // advertising, boosts and campaigns 
 app.use("/api/subscriptions", subscriptionRoutes); // Bascardo AI plans as Google Play subscriptions (migration 059)
 app.use("/api/notifications", notificationRoutes); // in-app notifications inbox
 app.use("/api/story", storyRoutes); // Bascardo Story Studio (migration 064)
+app.use("/api/content-studio", contentStudioRoutes); // Bascardo Content Studio (migration 071)
+app.use("/api/support", supportRoutes); // admin inbox + WhatsApp alerts (migration 069)
 
 // AI features
 app.use("/api/ai", aiRoutes);
@@ -1021,4 +1025,5 @@ app.listen(PORT, () => {
   startMarketTimers();
   startLeadershipGamesSweepTimer();
   startVoidedPurchaseSweepTimer();
+  startSupportAlertTimer();
 });

@@ -42,4 +42,4 @@ export const PLAY_PRODUCT_BY_ID = Object.fromEntries(
 );
 
 export const PLAY_PACKAGE_NAME =
-  process.env.GOOGLE_PLAY_PACKAGE_NAME || 'com.inyangojubirobert7.bookofmemes';
+  process.env.GOOGLE_PLAY_PACKAGE_NAME || 'com.bookofmemes.app';

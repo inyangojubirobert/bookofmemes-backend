@@ -320,6 +320,28 @@ router.post('/payout-accounts/usdt', authenticateToken, async (req, res) => {
   } catch (err) { fail(res, err); }
 });
 
+// Any other way to be paid (wallet app, foreign bank, PayPal...), in any
+// currency. Paid by an admin by hand (migration 070).
+router.post('/payout-accounts/manual', authenticateToken, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const provider = String(b.provider || '').trim();
+    const currency = String(b.currency || '').trim().toUpperCase();
+    const holder = String(b.holder || '').trim();
+    const details = String(b.details || '').trim();
+    if (provider.length < 2 || provider.length > 60) return res.status(400).json({ success: false, error: 'Enter how you want to be paid (e.g. Wise, PayPal, your bank)' });
+    if (!/^[A-Z]{3}$/.test(currency)) return res.status(400).json({ success: false, error: 'Enter a 3-letter currency code, e.g. USD, GBP, EUR' });
+    if (holder.length < 2 || holder.length > 100) return res.status(400).json({ success: false, error: 'Enter the account holder\'s name' });
+    if (details.length < 5 || details.length > 500) return res.status(400).json({ success: false, error: 'Enter the account details (5 to 500 characters)' });
+    const { data: profile } = await supabase.from('profiles').select('full_name').eq('id', req.user.id).single();
+    if (!namesMatch(holder, profile?.full_name)) {
+      return res.status(400).json({ success: false, error: 'The account holder must be you: use the same name as your profile.' });
+    }
+    const row = await rpc('save_manual_payout_account', { p_user_id: req.user.id, p_provider: provider, p_currency: currency, p_holder: holder, p_details: details });
+    res.json({ success: true, data: row });
+  } catch (err) { fail(res, err); }
+});
+
 // ── Admin ───────────────────────────────────────────────────────────────────
 async function requireAdmin(req, res, next) {
   try {
@@ -403,6 +425,10 @@ router.get('/admin/withdrawals', authenticateToken, requireAdmin, async (req, re
           .select('kind, currency, amount, created_at, ownership:ownership_id(to_user_id, sale_price)')
           .eq('user_id', w.user_id).order('created_at', { ascending: false }).limit(20);
         item.recent_earnings = sales || [];
+        // Where a Paystack transfer stands (e.g. 'otp' = waiting for the emailed code).
+        if (w.status === 'processing' && String(w.provider_ref || '').startsWith('bomwd_')) {
+          item.transfer_status = await paystack(`/transfer/verify/${w.provider_ref}`).then((t) => t.status).catch(() => 'unknown');
+        }
       }
       out.push(item);
     }
@@ -410,11 +436,41 @@ router.get('/admin/withdrawals', authenticateToken, requireAdmin, async (req, re
   } catch (err) { fail(res, err); }
 });
 
+// Saves a pay-by-hand instruction on the withdrawal so it stays on the
+// admin's card until marked paid (not only in the popup after approving).
+async function manualTodo(w, note) {
+  const { error } = await supabase.from('market_withdrawals')
+    .update({ admin_note: `${w.admin_note ? `${w.admin_note} ` : ''}To do: ${note}` }).eq('id', w.id);
+  if (error) console.error('withdrawal note save failed', w.id, error.message);
+  return { manual: true, note };
+}
+
+// Paystack couldn't pay: keep the withdrawal approved and hand it to the
+// admin to pay by hand (migration 070). The user is told and the admin gets a
+// WhatsApp alert. The money is never sent back to the balance automatically.
+async function fallbackToManual(w, reason) {
+  await rpc('market_withdrawal_to_manual', { p_withdrawal_id: w.id, p_reason: String(reason).slice(0, 200) });
+  return { manual: true, note: `Automatic transfer failed (${reason}). It is now a pay-by-hand task: send the money to the same account, then Mark paid.` };
+}
+
+const sure4xx = (err) => err instanceof PaystackError && err.status >= 400 && err.status < 500;
+
 async function payoutEarnings(w, s) {
   const d = w.payout_details || {};
-  if (d.method !== 'bank_ngn' || !transfersEnabled()) {
-    return { manual: true, note: d.method === 'bank_ngn' ? 'Automatic transfers are off: pay by bank transfer, then mark paid with the reference.' : `Send USDT to ${d.usdt_address}, then mark paid with the transaction hash.` };
+  const amt = `${w.currency} ${Number(w.amount).toFixed(2)}`;
+  if (d.method === 'manual') {
+    return manualTodo(w, `Pay ${amt} by hand through ${d.provider} in ${d.receive_currency} to ${d.account_name}: ${d.details}. Then Mark paid.`);
   }
+  if (d.method !== 'bank_ngn') return manualTodo(w, `Send USDT for ${amt} to ${d.usdt_address}, then Mark paid with the transaction hash.`);
+  if (!transfersEnabled()) return manualTodo(w, `Automatic transfers are off: pay ${amt} by bank transfer to ${d.bank_name} ${d.account_number} (${d.account_name}), then Mark paid with the reference.`);
+  return paystackTransfer(w, s);
+}
+
+// Sends an approved naira earnings withdrawal through Paystack. Used when it
+// is approved, and again from "Pay through Paystack" after topping up.
+async function paystackTransfer(w, s) {
+  const d = w.payout_details || {};
+  const amt = `${w.currency} ${Number(w.amount).toFixed(2)}`;
   let rate = null;
   let ngn;
   if (w.currency === 'NGN') {
@@ -422,27 +478,59 @@ async function payoutEarnings(w, s) {
   } else {
     const fx = await ngnRate();
     if (!fx || Date.now() - new Date(fx.fetched_at).getTime() > Number(s.fx_max_age_hours) * 3600_000) {
-      return { manual: true, note: 'No current exchange rate: pay by hand or retry later' };
+      return manualTodo(w, `No current exchange rate for an automatic transfer: pay ${amt} in naira by hand, then Mark paid.`);
     }
     rate = round2(Number(fx.units_per_usd) * (1 - Number(s.fx_spread_pct) / 100));
     ngn = Math.floor(Number(w.amount) * rate);
   }
-  const reference = `bomwd_${w.id.replace(/-/g, '')}`;
+  const naira = `₦${ngn.toLocaleString('en-NG')}`;
+  const byHand = `pay ${naira} by bank transfer to ${d.bank_name} ${d.account_number} (${d.account_name}), then Mark paid with the reference`;
+  // The Paystack account settles to the bank the next day (and is shared
+  // with One Dream), so its balance is usually empty. Only try a transfer
+  // the balance can cover; otherwise this is a normal pay-by-hand payout,
+  // with no failed attempt and no "transfer failed" message to the user.
+  try {
+    const balances = await paystack('/balance');
+    const available = Number((balances || []).find((b) => b.currency === 'NGN')?.balance ?? 0) / 100;
+    if (available < ngn) {
+      return manualTodo(w, `${byHand[0].toUpperCase()}${byHand.slice(1)}. (Paystack balance ₦${available.toLocaleString('en-NG')} can't cover it. Or top it up and press "Pay through Paystack".)`);
+    }
+  } catch (err) {
+    return manualTodo(w, `Couldn't read the Paystack balance (${err.message}): ${byHand}.`);
+  }
+  // Each attempt needs its own reference (Paystack rejects a reused one).
+  const reference = `bomwd_${w.id.replace(/-/g, '')}_${Date.now().toString(36)}`;
   await supabase.from('market_withdrawals').update({ provider_ref: reference, amount_paid: ngn, currency_paid: 'NGN', fx_rate: rate }).eq('id', w.id);
+  const settle = async (t) => {
+    if (t.status === 'success') {
+      await rpc('market_complete_withdrawal', { p_withdrawal_id: w.id, p_provider_ref: reference, p_amount_paid: ngn, p_currency_paid: 'NGN', p_fx_rate: rate, p_admin_id: null });
+      return { paid: true };
+    }
+    if (t.status === 'otp') {
+      // "Confirm transfers before sending" is on: Paystack emailed an OTP.
+      return { otp: true, note: `Paystack emailed you an OTP for ${naira}. Enter it on this withdrawal to send it.` };
+    }
+    if (['failed', 'reversed', 'abandoned', 'rejected'].includes(t.status)) return fallbackToManual(w, `Paystack transfer ${t.status}`);
+    return { pending: true, note: `Transfer ${t.status}. It will be confirmed automatically.` };
+  };
   try {
     const t = await paystack('/transfer', {
       method: 'POST',
       body: { source: 'balance', amount: ngn * 100, recipient: d.recipient_code, reference, reason: 'Book of Memes earnings' },
     });
-    if (t.status === 'success') {
-      await rpc('market_complete_withdrawal', { p_withdrawal_id: w.id, p_provider_ref: reference, p_amount_paid: ngn, p_currency_paid: 'NGN', p_fx_rate: rate, p_admin_id: null });
-      return { paid: true };
-    }
-    if (t.status === 'otp') return { manual: true, note: 'Paystack wants an OTP for this transfer. Finish it in the Paystack dashboard, then mark paid. Turn off transfer OTP to make this automatic.' };
-    return { pending: true, note: `Transfer ${t.status}. It will be confirmed automatically.` };
+    return settle(t);
   } catch (err) {
-    await supabase.from('market_withdrawals').update({ provider_ref: null }).eq('id', w.id);
-    return { manual: true, note: `Paystack transfer failed: ${err.message}. Fix it and retry, pay by hand, or mark failed to return the money.` };
+    // Paystack refused it outright (e.g. not enough balance): nothing was sent.
+    if (sure4xx(err)) return fallbackToManual(w, err.message);
+    // Timeout or server error: the transfer may still have been made, so ask
+    // Paystack before anyone pays by hand (paying twice is the risk here).
+    try {
+      return settle(await paystack(`/transfer/verify/${reference}`));
+    } catch (verifyErr) {
+      if (verifyErr instanceof PaystackError && verifyErr.status === 404) return fallbackToManual(w, err.message);
+      // Still unknown: leave the reference so the 10-minute check settles it.
+      return { pending: true, note: `Paystack didn't answer clearly (${err.message}). The transfer is checked again automatically; don't pay by hand unless it moves to pay-by-hand.` };
+    }
   }
 }
 
@@ -479,8 +567,14 @@ async function refundFunds(w) {
     await rpc('market_complete_withdrawal', { p_withdrawal_id: w.id, p_provider_ref: refs.join(','), p_amount_paid: Number(w.amount), p_currency_paid: w.currency, p_fx_rate: null, p_admin_id: null });
     return { paid: true };
   }
-  if (refs.length) await supabase.from('market_withdrawals').update({ admin_note: `${w.admin_note || ''} Refunds created: ${refs.join(',')}`.trim() }).eq('id', w.id);
-  return { manual: true, note: manual.join('; ') + (refs.length ? `. Already refunded through Paystack: ${refs.join(', ')}.` : '') };
+  const note = manual.join('; ') + (refs.length ? `. Already refunded through Paystack: ${refs.join(', ')}.` : '');
+  // Keep the to-do on the withdrawal itself so it stays on the admin's card
+  // until marked paid, not only in the one-time popup after approving.
+  const saved = await supabase.from('market_withdrawals')
+    .update({ admin_note: `${w.admin_note ? `${w.admin_note} ` : ''}To do: ${note}` })
+    .eq('id', w.id);
+  if (saved.error) console.error('refund note save failed', w.id, saved.error.message);
+  return { manual: true, note };
 }
 
 router.post('/admin/withdrawals/:id/approve', authenticateToken, requireAdmin, async (req, res) => {
@@ -514,6 +608,66 @@ router.post('/admin/withdrawals/:id/mark-failed', authenticateToken, requireAdmi
   try {
     const w = await rpc('market_fail_withdrawal', { p_withdrawal_id: req.params.id, p_reason: String(req.body?.reason || 'Payout failed') });
     res.json({ success: true, data: w });
+  } catch (err) { fail(res, err); }
+});
+
+// ── Paying an approved naira withdrawal through Paystack ───────────────────
+async function processingNairaWithdrawal(id) {
+  const { data: w, error } = await supabase.from('market_withdrawals').select('*').eq('id', id).maybeSingle();
+  if (error) throw error;
+  if (!w || w.status !== 'processing' || w.bucket !== 'earnings' || w.payout_details?.method !== 'bank_ngn') {
+    throw userError('Only an approved naira bank withdrawal can be paid through Paystack');
+  }
+  return w;
+}
+const inPaystack = (w) => String(w.provider_ref || '').startsWith('bomwd_');
+
+// After topping up the Paystack balance: send a pay-by-hand withdrawal through Paystack.
+router.post('/admin/withdrawals/:id/paystack', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const w = await processingNairaWithdrawal(req.params.id);
+    if (inPaystack(w)) throw userError('A Paystack transfer for this withdrawal already exists. Enter its OTP, or wait for it to be confirmed.');
+    if (!transfersEnabled()) throw userError('Paystack transfers are turned off on the server (PAYSTACK_TRANSFERS_ENABLED)');
+    res.json({ success: true, data: { withdrawal_id: w.id, ...(await paystackTransfer(w, await settings())) } });
+  } catch (err) { fail(res, err); }
+});
+
+// "Confirm transfers before sending" is on: finish the transfer with the OTP Paystack emailed.
+router.post('/admin/withdrawals/:id/otp', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const otp = String(req.body?.otp || '').replace(/\s/g, '');
+    if (!/^\d{4,8}$/.test(otp)) throw userError('Enter the OTP from the Paystack email');
+    const w = await processingNairaWithdrawal(req.params.id);
+    if (!inPaystack(w)) throw userError('This withdrawal has no Paystack transfer waiting for an OTP');
+    const complete = () => rpc('market_complete_withdrawal', {
+      p_withdrawal_id: w.id, p_provider_ref: w.provider_ref, p_amount_paid: w.amount_paid, p_currency_paid: 'NGN', p_fx_rate: w.fx_rate, p_admin_id: req.user.id,
+    });
+    const t = await paystack(`/transfer/verify/${w.provider_ref}`);
+    if (t.status === 'success') { await complete(); return res.json({ success: true, data: { paid: true } }); }
+    if (t.status !== 'otp') throw userError(`This transfer isn't waiting for an OTP (it is ${t.status})`);
+    let r;
+    try {
+      r = await paystack('/transfer/finalize_transfer', { method: 'POST', body: { transfer_code: t.transfer_code, otp } });
+    } catch (err) {
+      if (sure4xx(err)) throw userError(`Paystack: ${err.message}`); // wrong or expired OTP
+      throw err;
+    }
+    if (r.status === 'success') { await complete(); return res.json({ success: true, data: { paid: true } }); }
+    if (['failed', 'reversed', 'abandoned', 'rejected'].includes(r.status)) {
+      return res.json({ success: true, data: await fallbackToManual(w, `Paystack transfer ${r.status}`) });
+    }
+    res.json({ success: true, data: { pending: true, note: `Sent. Paystack says "${r.status}"; it is confirmed automatically.` } });
+  } catch (err) { fail(res, err); }
+});
+
+router.post('/admin/withdrawals/:id/otp/resend', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const w = await processingNairaWithdrawal(req.params.id);
+    if (!inPaystack(w)) throw userError('This withdrawal has no Paystack transfer waiting for an OTP');
+    const t = await paystack(`/transfer/verify/${w.provider_ref}`);
+    if (t.status !== 'otp') throw userError(`This transfer isn't waiting for an OTP (it is ${t.status})`);
+    await paystack('/transfer/resend_otp', { method: 'POST', body: { transfer_code: t.transfer_code, reason: 'transfer' } });
+    res.json({ success: true, data: { note: 'Paystack has emailed a new OTP.' } });
   } catch (err) { fail(res, err); }
 });
 
@@ -588,10 +742,17 @@ export async function runMarketReconciliation() {
         const t = await paystack(`/transfer/verify/${w.provider_ref}`);
         if (t.status === 'success') {
           await rpc('market_complete_withdrawal', { p_withdrawal_id: w.id, p_provider_ref: w.provider_ref, p_amount_paid: w.amount_paid, p_currency_paid: 'NGN', p_fx_rate: w.fx_rate, p_admin_id: null });
-        } else if (['failed', 'reversed'].includes(t.status)) {
-          await rpc('market_fail_withdrawal', { p_withdrawal_id: w.id, p_reason: `Bank transfer ${t.status}` });
+        } else if (['failed', 'reversed', 'abandoned', 'rejected'].includes(t.status)) {
+          // Not returned to the balance: the admin pays it by hand (070).
+          await rpc('market_withdrawal_to_manual', { p_withdrawal_id: w.id, p_reason: `Paystack transfer ${t.status}` });
         }
-      } catch (err) { console.error('[market] reconcile transfer', w.id, err.message); }
+      } catch (err) {
+        // Paystack has no transfer with this reference: it was never made.
+        if (err instanceof PaystackError && err.status === 404) {
+          await rpc('market_withdrawal_to_manual', { p_withdrawal_id: w.id, p_reason: 'Paystack has no record of the transfer' })
+            .catch((e) => console.error('[market] to manual', w.id, e.message));
+        } else console.error('[market] reconcile transfer', w.id, err.message);
+      }
     }
   }
 

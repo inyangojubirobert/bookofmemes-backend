@@ -42,8 +42,10 @@ const id = (v) => { const s = String(v || ''); if (!UUID.test(s)) throw userErro
 async function agentsById(ids) {
   const list = [...new Set(ids.filter(Boolean))];
   if (!list.length) return {};
-  const rows = must(await supabase.from('market_deposit_agents').select('user_id, display_name, whatsapp').in('user_id', list));
-  return Object.fromEntries(rows.map((a) => [a.user_id, { name: a.display_name, whatsapp: a.whatsapp }]));
+  // Buyers see the agent's name only. Proof of payment goes through the
+  // in-app admin inbox (migration 069), never to a staff phone number.
+  const rows = must(await supabase.from('market_deposit_agents').select('user_id, display_name').in('user_id', list));
+  return Object.fromEntries(rows.map((a) => [a.user_id, { name: a.display_name }]));
 }
 
 function depositView(p, link, agent) {

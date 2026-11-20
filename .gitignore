@@ -7,8 +7,3 @@ node_modules/
 # Logs
 npm-debug.log
 yarn-error.log
-
-# Local-only
-.env.*
-secrets/
-.expo/

@@ -38,7 +38,10 @@ export const AI_MODELS = {
     PREMIUM: process.env.RUNWARE_VIDEO_HD_MODEL || 'bytedance:seedance@2.0',
   },
   VOICE: {
-    FREE: process.env.RUNWARE_VOICE_FREE_MODEL || 'google:gemini@3.1-flash-tts',
+    // 2026-11-20, measured on Runware: Gemini 3.1 Flash TTS cost $0.034-0.061 a
+    // minute, Fish Audio S2.1 Pro $0.0135 a minute. The "free" voice was both
+    // worse and 3-4x dearer, so every plan now uses Fish Audio.
+    FREE: process.env.RUNWARE_VOICE_FREE_MODEL || 'fishaudio:s2.1@pro',
     PREMIUM: process.env.RUNWARE_VOICE_HD_MODEL || 'fishaudio:s2.1@pro',
   },
 };
@@ -46,6 +49,6 @@ export const AI_MODELS = {
 // Preset voice ids -- only relevant for VOICE, kept alongside the model map
 // since a voice id is meaningless without knowing which model it belongs to.
 export const AI_VOICE_PRESETS = {
-  FREE: process.env.RUNWARE_VOICE_FREE_PRESET || 'Zephyr', // Gemini's own default preset (Female, Bright)
+  FREE: process.env.RUNWARE_VOICE_FREE_PRESET || '98655a12fa944e26b274c535e5e03842', // same Fish Audio preset as premium
   PREMIUM: process.env.RUNWARE_VOICE_HD_PRESET || '98655a12fa944e26b274c535e5e03842', // Fish Audio preset "Egirl"
 };

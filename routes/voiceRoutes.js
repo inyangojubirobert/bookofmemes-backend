@@ -43,10 +43,10 @@ const RUNWARE_API_KEY = process.env.RUNWARE_API_KEY;
 // budget is tracked in estimated SECONDS using an average speaking rate --
 // simpler and more meaningful to a user than a raw character or token count,
 // and independent of whichever provider/model is actually behind the scenes.
-const CHARS_PER_SECOND = 15; // ~150 wpm, ~6 chars/word incl. spaces
+export const CHARS_PER_SECOND = 15; // ~150 wpm, ~6 chars/word incl. spaces
 // Monthly narration allowance per plan: config/aiPlans.js (narrationSecondsPerMonth).
 const HD_COST_PER_MINUTE = CREDIT_PRICES.voiceHdPerMinute; // credits per started minute of HD narration
-const MAX_CHARS_PER_REQUEST = 1200; // ~80s -- keeps any single call bounded regardless of tier
+export const MAX_CHARS_PER_REQUEST = 1200; // ~80s -- keeps any single call bounded regardless of tier
 
 function estimateSeconds(text) {
   return Math.ceil(text.length / CHARS_PER_SECOND);
@@ -72,7 +72,8 @@ async function callRunwareTasks(tasks) {
   return { data: json?.data || [], status: response.status };
 }
 
-async function synthesizeSpeech(text, { useHdModel }) {
+// Also used by the Content Studio to narrate a podcast script in parts.
+export async function synthesizeSpeech(text, { useHdModel }) {
   const task = {
     taskType: 'audioInference',
     taskUUID: crypto.randomUUID(),
