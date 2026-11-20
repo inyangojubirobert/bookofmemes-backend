@@ -61,7 +61,7 @@ export const MEDIA_CAPABILITIES = {
   },
   voice: {
     'fishaudio:s2.1@pro': { label: 'Fish Audio S2.1 Pro', status: 'in_use', maxCharsPerCall: 1200, realCostUsd: { perMinute: 0.0135 }, verified: '2026-11-20' },
-    'google:gemini@3.1-flash-tts': { label: 'Gemini 3.1 Flash TTS', status: 'retired', realCostUsd: { perMinute: [0.034, 0.061] }, verified: '2026-11-20' },
+    'google:gemini@3.1-flash-tts': { label: 'Gemini 3.1 Flash TTS', status: 'retired', retiredByRunware: '2026-12-18', realCostUsd: { perMinute: [0.034, 0.061] }, verified: '2026-11-20' },
   },
   merge: {
     cloudinary_splice: {

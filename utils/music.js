@@ -4,8 +4,9 @@
 // The result is copied to our Cloudinary (provider links don't last).
 import crypto from 'crypto';
 import { v2 as cloudinary } from 'cloudinary';
+import { RETIRED_MODELS } from '../config/aiModels.js';
 
-const MODEL = process.env.RUNWARE_MUSIC_MODEL || 'runware:ace-step@v1.5-xl-turbo';
+const MODEL = (process.env.RUNWARE_MUSIC_MODEL && !RETIRED_MODELS[process.env.RUNWARE_MUSIC_MODEL] ? process.env.RUNWARE_MUSIC_MODEL : null) || 'runware:ace-step@v1.5-xl-turbo';
 const KEY = () => process.env.RUNWARE_API_KEY;
 export const SONG_SECONDS = [30, 60, 120];
 export const MUSIC_MODEL = MODEL;
