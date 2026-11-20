@@ -5,7 +5,7 @@
 // Defaults: 3% of users pay, free users use 50% of their credits, payers 70%.
 // Costs are the worst-case USD per action in config/aiPlans.js
 // (ACTION_COST_USD); Google keeps 15% of subscriptions.
-import { AI_PLANS, ACTION_COSTS, ACTION_COST_USD, CREDIT_COST_CEILING_USD, CORRECTION_COST_USD } from '../config/aiPlans.js';
+import { AI_PLANS, ACTION_COSTS, ACTION_COST_USD, CREDIT_COST_CEILING_USD, CORRECTION_COST_USD, TOPUP_PACKS } from '../config/aiPlans.js';
 
 const [conv = 3, freeUse = 50, paidUse = 70] = process.argv.slice(2).map(Number);
 const GOOGLE_FEE = 0.15;
@@ -46,5 +46,35 @@ for (const p of [AI_PLANS.pro, AI_PLANS.business]) {
   console.log(`  left after carrying ${freePerPayer.toFixed(0)} free users: worst $${carryWorst.toFixed(2)}, typical $${carryTypical.toFixed(2)} (${Math.round(carryTypical / net * 100)}% of what we receive)`);
   console.log(`  ${Math.floor((net - worst) / freeWorst)} free users fully covered per subscriber in the worst case`);
 }
+// Top-ups: must cost more per credit than the cheapest subscription credit,
+// and still beat the worst cost per credit after Google's cut (up to 30% on
+// wallet purchases).
+const PLAY_FEE_MAX = 0.30;
+const bestPlanPerCredit = Math.min(...[AI_PLANS.pro, AI_PLANS.business].map((p) => p.priceUsd / p.monthlyCredits));
+const worstAny = Math.max(worstPerCredit(true), worstPerCredit(false));
+console.log(`\nTop-ups (best subscription price per credit $${bestPlanPerCredit.toFixed(4)}, worst cost per credit $${worstAny.toFixed(4)}):`);
+for (const p of Object.values(TOPUP_PACKS)) {
+  const per = p.priceUsd / p.credits;
+  const net = per * (1 - PLAY_FEE_MAX);
+  const flags = [per < bestPlanPerCredit - 1e-9 && 'CHEAPER THAN A PLAN', net < worstAny && 'LOSES MONEY'].filter(Boolean);
+  if (flags.length) ok = false;
+  console.log(`  ${p.id.padEnd(14)} ${String(p.credits).padStart(4)} credits $${p.priceUsd.toFixed(2)} = $${per.toFixed(4)}/credit, after Google's cut $${net.toFixed(4)} (${Math.round(net / worstAny)}x worst cost)${flags.length ? '  ✘ ' + flags.join(', ') : ''}`);
+}
+
+// Free plan: can a free user finish one thing in each studio within its credits?
+const f = (a, n = 1) => ACTION_COSTS[a === 'narration' ? 'narrationPerMinute' : a === 'song' ? 'songPerMinute' : a].fast * n;
+const taste = {
+  'story (plan + chapter 1)': f('storyPlan') + f('storyChapter'),
+  '4-page picture book (ideas, pages, 4 pictures)': f('bookConcepts') + f('bookPagesShort') + f('image', 4),
+  'meme (ideas, draft, picture)': f('contentIdeas') + f('contentDraft') + f('image'),
+  'puzzle (ideas, verified draft, picture)': f('contentIdeas') + f('contentDraftVerified') + f('image'),
+  'kids post (ideas, draft, picture)': f('contentIdeas') + f('contentDraft') + f('image'),
+  'song (ideas, lyrics, 1-minute song, cover)': f('contentIdeas') + f('contentDraft') + f('song') + f('image'),
+  '1-minute podcast (ideas, script, narration)': f('contentIdeas') + f('contentDraftLong') + f('narration', 1),
+};
+console.log(`\nFree plan (${AI_PLANS.free.monthlyCredits} credits): one finished piece per studio`);
+for (const [k, v] of Object.entries(taste)) console.log(`  ${v <= AI_PLANS.free.monthlyCredits ? '✔' : '·'} ${k}: ${v} credits${v > AI_PLANS.free.monthlyCredits ? ' (needs a top-up or a plan)' : ''}`);
+console.log('  · video: Pro and Business only (by decision)');
+
 console.log(ok ? '\n✔ Every plan pays for itself and its free users.' : '\n✘ Something loses money: fix ACTION_COSTS or monthlyCredits.');
 process.exit(ok ? 0 : 1);

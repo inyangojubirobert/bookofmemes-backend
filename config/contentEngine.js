@@ -38,6 +38,12 @@ function normQuiz(q) {
 const quizProblem = (q) => (!q.question_text || !q.correct_answer || !q.wrong_answers.length ? 'quiz needs a question, a correct answer and wrong answers'
   : q.wrong_answers.some((w) => w.toLowerCase() === q.correct_answer.toLowerCase()) ? 'a wrong answer repeats the correct one' : null);
 
+export const AGE_BANDS = { '3-5': 'children aged 3-5 (very simple words, one idea, lots of repetition)', '6-8': 'children aged 6-8 (simple sentences, familiar words)', '9-12': 'children aged 9-12 (richer words, real curiosity)' };
+export const PODCAST_MINUTES = [1, 3, 5, 10];
+const WORDS_PER_MINUTE = 150;
+// Words children's posts must never contain (checked on every kids draft; a hit means a retry).
+const KIDS_UNSAFE = /\b(kill|killed|blood|bloody|gun|guns|knife|stab|dead|death|die|dies|murder|sexy|sex|alcohol|beer|wine|drunk|drug|drugs|cigarette|smoke|smoking|weapon|bomb|scary|horror|hate)\b/i;
+
 const QUIZ_SHAPE = '"quiz": {"question": "a question about this post that viewers answer", "correct_answer": "short", "wrong_answers": ["short", "short", "short"], "explanation": "one sentence: why the answer is right"}';
 const IMAGE_RULE = '"image_prompt": "a detailed picture description for an AI image generator: subject, setting, style, colours, framing, under 80 words. No words or letters in the picture (AI images spell badly)."';
 
@@ -54,7 +60,7 @@ export const CONTENT_TYPES = {
     toForm: (d) => ({ values: { title: d.title, description: [d.caption, d.description].filter(Boolean).join('\n\n') }, quiz: d.quiz, imageFields: ['image', 'question_image'] }),
   },
   puzzles: {
-    label: 'Puzzle', draftAction: 'contentDraft', maxTokens: 1300, media: ['image'], quiz: true,
+    label: 'Puzzle', draftAction: 'contentDraftVerified', maxTokens: 1300, media: ['image'], quiz: true, verify: true,
     brief: 'a puzzle post: a riddle, logic puzzle, word puzzle, number puzzle or brain teaser that has exactly one clear, fair answer.',
     conceptHint: 'three different kinds of puzzle on the idea, from easier to harder',
     draftShape: `"title": "short title", "difficulty": "easy | medium | hard", "puzzle": "the full puzzle as the viewer reads it, with everything needed to solve it", "hint": "one gentle hint", ${IMAGE_RULE}, ${QUIZ_SHAPE.replace('a question about this post that viewers answer', 'the puzzle question in one line')}`,
@@ -64,25 +70,33 @@ export const CONTENT_TYPES = {
   kids_collections: {
     label: 'For Kids', draftAction: 'contentDraft', maxTokens: 1500, media: ['image'], quiz: true,
     brief: 'a post for children aged 4-10: a short story, fun fact, counting or learning activity. Simple words, warm and safe, nothing scary or violent.',
+    briefFor: (st) => `a post for ${AGE_BANDS[st.age_band] || AGE_BANDS['6-8']}: a short story, fun fact, counting or learning activity. Warm and safe, nothing scary, violent or unkind.`,
     conceptHint: 'three different kid-friendly takes (e.g. tiny story, learning activity, fun fact)',
     draftShape: `"title": "short title", "age_range": "e.g. 4-6", "text": "the content, 80-200 words in simple sentences", "lesson": "what the child learns, one line", ${IMAGE_RULE.replace('AI image generator:', 'AI image generator, bright and friendly for children:')}, ${QUIZ_SHAPE.replace('a question about this post that viewers answer', 'a simple question a child can answer by looking at the picture or the text')}`,
-    check: (d) => (!d.title || !d.text ? 'missing title/text' : quizProblem(d.quiz)),
+    check: (d) => (!d.title || !d.text ? 'missing title/text' : KIDS_UNSAFE.test(`${d.title} ${d.text} ${d.image_prompt || ''} ${JSON.stringify(d.quiz || {})}`) ? 'unsuitable word for children' : quizProblem(d.quiz)),
     toForm: (d) => ({ values: { title: d.title, description: [d.text, d.lesson && `What we learn: ${d.lesson}`].filter(Boolean).join('\n\n') }, quiz: d.quiz, imageFields: ['question_image', 'cover_image'] }),
   },
   music_box: {
-    label: 'Music', draftAction: 'contentDraft', maxTokens: 1800, media: ['image'], quiz: false,
+    label: 'Music', draftAction: 'contentDraft', maxTokens: 1800, media: ['image', 'audio'], quiz: false,
     brief: 'an original song: lyrics with a clear hook, plus the details to post it. Original words only; never copy or closely imitate existing songs or artists.',
     conceptHint: 'three different songs the idea could become (different mood, genre or point of view)',
     draftShape: `"title": "song title", "genre": "genre", "mood": "mood and tempo, e.g. upbeat 110 bpm", "description": "1-2 sentences for listeners", "lyrics": "full lyrics with [Verse 1], [Chorus], [Verse 2], [Bridge] labels", "cover_prompt": "${'a detailed cover-art description for an AI image generator, under 80 words, no words or letters'}"`,
     check: (d) => (!d.title || !d.lyrics || d.lyrics.length < 200 ? 'missing title/lyrics' : null),
-    toForm: (d) => ({ values: { title: d.title, genre: d.genre, description: [d.description, d.mood && `Mood: ${d.mood}`].filter(Boolean).join('\n'), lyrics: d.lyrics, content_type: 'album' }, imageFields: ['cover_image'] }),
+    toForm: (d) => ({ values: { title: d.title, genre: d.genre, description: [d.description, d.mood && `Mood: ${d.mood}`].filter(Boolean).join('\n'), lyrics: d.lyrics, content_type: 'album' }, imageFields: ['cover_image'], audioField: 'audio' }),
   },
   podcast_box: {
     label: 'Podcast', draftAction: 'contentDraftLong', maxTokens: 3600, media: ['image', 'audio'], quiz: false,
-    brief: 'a podcast episode: a strong angle, a clear structure and a script a host can read out (about 5-7 minutes spoken).',
+    brief: 'a podcast episode: a strong angle, a clear structure and a script a host can read out (about 5 minutes spoken).',
+    briefFor: (st) => { const m = PODCAST_MINUTES.includes(Number(st.minutes)) ? Number(st.minutes) : 5; return `a podcast episode of about ${m} minute${m === 1 ? '' : 's'} spoken (about ${m * WORDS_PER_MINUTE} words): a strong angle, a clear structure and a script a host can read out.`; },
+    shapeFor: (st) => { const m = PODCAST_MINUTES.includes(Number(st.minutes)) ? Number(st.minutes) : 5; return `"title": "episode title", "description": "2-3 sentences for the episode page", "outline": ["segment: what it covers"], "script": "the full host script, ${Math.round(m * WORDS_PER_MINUTE * 0.9)}-${Math.round(m * WORDS_PER_MINUTE * 1.1)} words, conversational, with [MUSIC] / [PAUSE] cues", "cover_prompt": "a detailed cover-art description for an AI image generator, under 80 words, no words or letters"`; },
     conceptHint: 'three different episode angles (e.g. explainer, story-led, debate or interview-style)',
     draftShape: `"title": "episode title", "description": "2-3 sentences for the episode page", "outline": ["segment: what it covers"], "script": "the full host script, 700-1000 words, conversational, with [MUSIC] / [PAUSE] cues", "cover_prompt": "a detailed cover-art description for an AI image generator, under 80 words, no words or letters"`,
-    check: (d) => (!d.title || !d.script || d.script.length < 1500 ? 'missing title/script' : null),
+    check: (d, st = {}) => {
+      const m = PODCAST_MINUTES.includes(Number(st.minutes)) ? Number(st.minutes) : 5;
+      const w = (String(d.script || '').match(/\S+/g) || []).length;
+      if (!d.title || !d.script) return 'missing title/script';
+      return w < m * WORDS_PER_MINUTE * 0.6 ? `script has ${w} words, needs about ${m * WORDS_PER_MINUTE}` : null;
+    },
     toForm: (d) => ({ values: { title: d.title, description: [d.description, d.outline?.length ? `In this episode:\n${d.outline.map((o) => `• ${o}`).join('\n')}` : ''].filter(Boolean).join('\n\n'), transcript: d.script, content_type: 'episode' }, imageFields: ['cover_image'], audioField: 'audio' }),
   },
   tv_box: {
@@ -149,28 +163,33 @@ function normConcepts(list) {
 }
 
 // ── 1. Three concepts for the post ──────────────────────────────────────────
-export async function proposeConcepts({ itemType, idea, notes, avoid = [] }) {
+export async function proposeConcepts({ itemType, idea, notes, avoid = [], imageUrl = null, settings = {} }) {
   const t = spec(itemType);
-  const user = `The author wants to make ${t.brief}
+  const brief = t.briefFor ? t.briefFor(settings) : t.brief;
+  const text = `The author wants to make ${brief}
+${imageUrl ? 'They attached a photo: build the ideas on what is actually in it (its subject, expression, situation). Also describe the photo in "photo_description".\n' : ''}
 ${notes ? `Author's wishes (tone, audience, style): ${clean(notes).slice(0, LIMITS.notesChars)}\n` : ''}${avoid.length ? `Already suggested (offer different ones): ${avoid.map((a) => clean(a)).join('; ').slice(0, 600)}\n` : ''}
 <source>
 ${clean(idea).slice(0, LIMITS.ideaChars)}
 </source>
 
 Offer ${t.conceptHint}. Keep what the author already decided. Reply with JSON only:
-{"concepts": [{"title": "short name", "pitch": "2-3 sentences: exactly what the post would be", "why": "one line: why people will enjoy it"}]}
+{${imageUrl ? '"photo_description": "2 sentences: what the photo shows", ' : ''}"concepts": [{"title": "short name", "pitch": "2-3 sentences: exactly what the post would be", "why": "one line: why people will enjoy it"}]}
 Exactly 3 concepts, each pitch under 60 words.`;
-  const { data, usage, id } = await askJson({ kind: `${itemType}:concepts`, user, maxTokens: 900 },
-    (d) => ({ concepts: normConcepts(d.concepts) }),
+  const user = imageUrl ? [{ type: 'image', source: { type: 'url', url: imageUrl } }, { type: 'text', text }] : text;
+  const { data, usage, id } = await askJson({ kind: `${itemType}:concepts`, user, maxTokens: 1000 },
+    (d) => ({ concepts: normConcepts(d.concepts), photo_description: str(d.photo_description, 600) }),
     (d) => (d.concepts.length < 2 ? 'fewer than 2 concepts' : null));
-  return { concepts: data.concepts, usage, id };
+  return { concepts: data.concepts, photoDescription: data.photo_description || null, usage, id };
 }
 
 // ── 2. The finished draft for the chosen concept ────────────────────────────
-export async function writeDraft({ itemType, idea, notes, concept, tweak }) {
+export async function writeDraft({ itemType, idea, notes, concept, tweak, settings = {} }) {
   const t = spec(itemType);
-  const user = `The author wants to make ${t.brief}
-${notes ? `Author's wishes: ${clean(notes).slice(0, LIMITS.notesChars)}\n` : ''}Their original idea:
+  const brief = t.briefFor ? t.briefFor(settings) : t.brief;
+  const shape = t.shapeFor ? t.shapeFor(settings) : t.draftShape;
+  const user = `The author wants to make ${brief}
+${notes ? `Author's wishes: ${clean(notes).slice(0, LIMITS.notesChars)}\n` : ''}${settings.photo_description ? `The post uses the author's own photo, which shows: ${clean(settings.photo_description).slice(0, 600)}. The text must fit that photo; the image_prompt is only a fallback.\n` : ''}Their original idea:
 <source>
 ${clean(idea).slice(0, LIMITS.ideaChars)}
 </source>
@@ -178,7 +197,7 @@ ${clean(idea).slice(0, LIMITS.ideaChars)}
 The concept they picked: ${clean(concept.title)}: ${clean(concept.pitch)}
 ${tweak ? `Their changes to it: <source>${clean(tweak).slice(0, LIMITS.tweakChars)}</source>\n` : ''}
 Make the finished post. Reply with JSON only, in this shape:
-{${t.draftShape}}`;
+{${shape}}`;
 
   const normalise = (d) => {
     const out = {};
@@ -189,8 +208,30 @@ Make the finished post. Reply with JSON only, in this shape:
     }
     return out;
   };
-  const { data, usage, id } = await askJson({ kind: `${itemType}:draft`, user, maxTokens: t.maxTokens }, normalise, t.check);
+  const { data, usage, id } = await askJson({ kind: `${itemType}:draft`, user, maxTokens: t.maxTokens }, normalise, (d) => t.check(d, settings));
   return { draft: data, usage, id };
+}
+
+// ── Puzzles: solve it independently before calling it done ─────────────────
+// A second, separate reading of the puzzle (without being told the answer)
+// must pick the same answer from the options and find it unambiguous.
+export async function verifyPuzzle(draft) {
+  const q = draft.quiz || {};
+  const options = [q.correct_answer, ...(q.wrong_answers || [])].filter(Boolean).sort(() => Math.random() - 0.5);
+  const text = `Solve this puzzle carefully. Do not guess.
+<source>
+${clean(draft.puzzle || '').slice(0, 3000)}
+${draft.hint ? `Hint: ${clean(draft.hint).slice(0, 300)}` : ''}
+Question: ${clean(q.question_text || '').slice(0, 300)}
+Options: ${options.map((o) => `"${clean(o)}"`).join(', ')}
+</source>
+Reply with JSON only: {"answer": "exactly one of the options", "unique": true or false (false if more than one option could be right or none is), "reason": "one sentence"}`;
+  const m = await anthropic.messages.create({ model: CONTENT_MODEL, max_tokens: 400, system: 'You are a careful puzzle checker. You solve puzzles step by step and report honestly when a puzzle is ambiguous or has no correct option.', messages: [{ role: 'user', content: text }] });
+  const raw = m.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
+  let d = {};
+  try { d = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1)); } catch { /* treated as a failed check */ }
+  const ok = !!d.answer && String(d.answer).trim().toLowerCase() === String(q.correct_answer || '').trim().toLowerCase() && d.unique !== false;
+  return { ok, answer: str(d.answer, 120), reason: str(d.reason, 300), usage: { input_tokens: m.usage.input_tokens, output_tokens: m.usage.output_tokens } };
 }
 
 // What Add Content needs to prefill its form from a draft.

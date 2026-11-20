@@ -76,6 +76,17 @@ export const ACTION_COSTS = {
   contentIdeas: { fast: 2, premium: 2 },      // read the idea, offer 3 concepts for the post
   contentDraft: { fast: 2, premium: 2 },      // write the finished post (meme, puzzle, kids, song, TV clip)
   contentDraftLong: { fast: 4, premium: 4 },  // write a podcast episode script
+  contentDraftVerified: { fast: 3, premium: 3 }, // puzzle: write it, then solve it independently to prove the answer
+  // Book Studio (config/bookEngine.js)
+  bookConcepts: { fast: 3, premium: 3 },      // 3 book ideas, each with a page plan and a visual identity
+  bookPagesShort: { fast: 2, premium: 2 },    // up to 4 picture-book / early-reader / poetry pages
+  bookPagesLong: { fast: 4, premium: 4 },     // up to 4 chapter-book / guide pages
+  // Video Studio (config/videoEngine.js); clips use the video price, Pro/Business only
+  videoPlan: { fast: 3, premium: 3 },         // storyline -> shot list fitted to the chosen length
+  videoPlanWithReference: { fast: 4, premium: 4 }, // ... plus reading 3 frames of a reference video
+  videoRender: { fast: 2, premium: 2 },       // join the clips + voice-over/music into one MP4
+  // Music (ACE-Step 1.5 XL turbo on Runware)
+  songPerMinute: { fast: 1, premium: 1 },     // a song or instrumental, per started minute
 };
 
 // Our worst-case cost per action in USD (Haiku 4.5: $1 / $5 per million input / output tokens):
@@ -96,6 +107,14 @@ export const ACTION_COSTS = {
 //   contentIdeas     ≤2.2k input (idea capped at 4,000 characters) + 900 output        ≈ $0.0067
 //   contentDraft     ≤2.5k input + 1,800 output (the largest non-podcast draft)       ≈ $0.0115
 //   contentDraftLong ≤2.5k input + 3,600 output (podcast script)                      ≈ $0.0205
+//   contentDraftVerified  draft (as contentDraft) + an independent solve ≤1.5k in + 400 out ≈ $0.0150
+//   bookConcepts     ≤2.5k input + 3,000 output (3 concepts, ≤12-page plans, identity) ≈ $0.0175
+//   bookPagesShort   ≤4k input (plan, identity, memory) + 1,200 output (4 short pages)   ≈ $0.0100
+//   bookPagesLong    ≤4k input + 3,800 output (4 pages of ≤380 words; measured 2,987)    ≈ $0.0230
+//   videoPlan        ≤5k input (storyline or story memory) + 2,500 output (≤12 shots)    ≈ $0.0175
+//   videoPlanWithReference  + 3 video frames read (≈4.8k input)                           ≈ $0.0223
+//   videoRender      Cloudinary splice (measured 4 s for 2 clips; plan quota, not per call) ≈ $0.0100 budget
+//   songPerMinute    ACE-Step 1.5 XL turbo, measured $0.00225 per 60 s song               ≈ $0.0023
 export const ACTION_COST_USD = {
   research: { fast: 0.0065, premium: 0.0065 },
   translate: { fast: 0.0062, premium: 0.0062 },
@@ -111,14 +130,35 @@ export const ACTION_COST_USD = {
   contentIdeas: { fast: 0.0067, premium: 0.0067 },
   contentDraft: { fast: 0.0115, premium: 0.0115 },
   contentDraftLong: { fast: 0.0205, premium: 0.0205 },
+  contentDraftVerified: { fast: 0.0150, premium: 0.0150 },
+  bookConcepts: { fast: 0.0175, premium: 0.0175 },
+  bookPagesShort: { fast: 0.0100, premium: 0.0100 },
+  bookPagesLong: { fast: 0.0230, premium: 0.0230 },
+  videoPlan: { fast: 0.0175, premium: 0.0175 },
+  videoPlanWithReference: { fast: 0.0223, premium: 0.0223 },
+  videoRender: { fast: 0.0100, premium: 0.0100 },
+  songPerMinute: { fast: 0.0023, premium: 0.0023 },
+};
+
+// ── Top-ups: extra AI credits bought with wallet balance ────────────────────
+// For anyone (Free included) who has used the month's credits. They never
+// expire and are spent only after the plan's monthly credits. Priced ABOVE a
+// subscription's per-credit price (Pro: $9 / 200 = $0.045), so a plan stays the
+// better deal, and far above our worst cost per credit even after Google's cut
+// of the wallet purchase. scripts/aiPlanEconomics.js checks both.
+export const TOPUP_PACKS = {
+  ai_topup_60: { id: 'ai_topup_60', credits: 60, priceUsd: 3 },     // $0.050 a credit
+  ai_topup_150: { id: 'ai_topup_150', credits: 150, priceUsd: 7 },  // $0.047
+  ai_topup_400: { id: 'ai_topup_400', credits: 400, priceUsd: 19 }, // $0.0475
 };
 export const CORRECTION_COST_USD = 0.0011;
 
 export function creditsFor(action, { premium = false, reference = false, seconds = 0 } = {}) {
-  const c = ACTION_COSTS[action === 'narration' ? 'narrationPerMinute' : action];
+  const key = action === 'narration' ? 'narrationPerMinute' : action === 'song' ? 'songPerMinute' : action;
+  const c = ACTION_COSTS[key];
   if (!c) throw new Error(`unknown AI action ${action}`);
   let n = premium ? (reference && c.premiumWithReference ? c.premiumWithReference : c.premium) : c.fast;
-  if (action === 'narration') n *= Math.max(1, Math.ceil(seconds / 60));
+  if (action === 'narration' || action === 'song') n *= Math.max(1, Math.ceil(seconds / 60));
   return n;
 }
 

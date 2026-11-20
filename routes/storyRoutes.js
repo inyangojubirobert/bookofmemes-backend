@@ -113,10 +113,11 @@ router.get('/config', authenticateToken, async (req, res) => {
 
 // ── My projects ─────────────────────────────────────────────────────────────
 router.get('/projects', authenticateToken, async (req, res) => {
-  const { data, error } = await supabase.from('story_projects')
-    .select('id, title, stage, plan, story_id, continued_from_story, updated_at, created_at')
-    .eq('user_id', req.user.id).order('updated_at', { ascending: false }).limit(50);
+  const { data: all, error } = await supabase.from('story_projects')
+    .select('*')
+    .eq('user_id', req.user.id).order('updated_at', { ascending: false }).limit(80);
   if (error) return fail(res, 500, 'Could not load your stories');
+  const data = (all || []).filter((p) => p.kind !== 'book').slice(0, 50); // books live in Book Studio (/api/book)
   const ids = (data || []).map((p) => p.id);
   const counts = {};
   if (ids.length) {

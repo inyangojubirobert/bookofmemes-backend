@@ -14,8 +14,20 @@ export function resetsAt(now = new Date()) {
 /** { plan, limit, used, held, remaining, resetsAt } for this month. "held" = reserved by steps still running. */
 export async function creditStatus(userId, plan = null) {
   const p = plan || await getAiPlan(userId);
-  const [used, held] = await Promise.all([monthlyUsage(userId, FEATURE), heldCredits(userId)]);
-  return { plan: p, limit: p.monthlyCredits, used, held, remaining: Math.max(0, p.monthlyCredits - used - held), resetsAt: resetsAt() };
+  const [used, held, topup] = await Promise.all([monthlyUsage(userId, FEATURE), heldCredits(userId), topupCredits(userId)]);
+  // Plan credits left this month, plus top-up credits (used after the month's), minus what running steps hold.
+  const remaining = Math.max(0, Math.max(0, p.monthlyCredits - used) + topup - held);
+  return { plan: p, limit: p.monthlyCredits, used, held, topup, remaining, resetsAt: resetsAt() };
+}
+
+// Top-up credits bought with wallet balance (migration 075). 0 until it's run.
+let topupsLive = null;
+async function topupCredits(userId) {
+  if (topupsLive === false) return 0;
+  const { data, error } = await supabase.rpc('ai_topup_balance', { p_user_id: userId });
+  if (error) { if (/ai_topup_balance|PGRST202|could not find/i.test(error.message)) topupsLive = false; return 0; }
+  topupsLive = true;
+  return Number(data) || 0;
 }
 
 // ── Reservations (migration 073) ────────────────────────────────────────────
@@ -84,7 +96,7 @@ export function creditsView(status, action, opts = {}) {
     plan: status.plan.id,
     planName: status.plan.name,
     premium: status.plan.premiumModels,
-    credits: { limit: status.limit, used: status.used, remaining: status.remaining, resetsAt: status.resetsAt },
+    credits: { limit: status.limit, used: status.used, remaining: status.remaining, topup: status.topup || 0, resetsAt: status.resetsAt },
     creditCost: cost,
     // How many more of this action the pool covers (kept for older app screens).
     remaining: Math.floor(status.remaining / cost),
@@ -92,5 +104,6 @@ export function creditsView(status, action, opts = {}) {
 }
 
 export function outOfCreditsMessage(status, cost, extra = '') {
-  return `This needs ${cost} AI credit${cost === 1 ? '' : 's'} and you have ${status.remaining} of your ${status.limit} ${status.plan.name} credits left this month.${extra}`;
+  const top = status.topup ? ` (including ${status.topup} top-up credits)` : '';
+  return `This needs ${cost} AI credit${cost === 1 ? '' : 's'} and you have ${status.remaining} left${top}: your ${status.plan.name} plan gives ${status.limit} a month. Top up AI credits from your wallet, or get more with a Bascardo AI plan.${extra && !/plan/i.test(extra) ? extra : ''}`;
 }

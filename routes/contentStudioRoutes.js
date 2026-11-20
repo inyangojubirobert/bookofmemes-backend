@@ -21,10 +21,12 @@ import { authenticateToken } from '../auth.js';
 import { creditStatus } from '../utils/aiCredits.js';
 import { runChargedStep } from '../utils/studioSteps.js';
 import { creditsFor } from '../config/aiPlans.js';
-import { saveToGallery } from '../utils/gallery.js';
+import { saveToGallery, isOurCloudinary } from '../utils/gallery.js';
+import { generateSong, SONG_SECONDS, MUSIC_MODEL } from '../utils/music.js';
+import { v2 as cloudinary } from 'cloudinary';
 import { narrateScript, speakableText, estimateSeconds, MAX_SCRIPT_CHARS } from '../utils/podcastNarration.js';
 import {
-  proposeConcepts, writeDraft, draftToForm, publicTypes, ContentError,
+  proposeConcepts, writeDraft, verifyPuzzle, draftToForm, publicTypes, ContentError, AGE_BANDS, PODCAST_MINUTES,
   CONTENT_TYPES, STUDIO_TYPES, LIMITS, CONTENT_MODEL, PROMPT_VERSION,
 } from '../config/contentEngine.js';
 
@@ -80,7 +82,8 @@ router.get('/config', authenticateToken, async (req, res) => {
       success: true,
       data: {
         types,
-        costs: { ideas: creditsFor('contentIdeas', { premium }), image: creditsFor('image', { premium }), video: creditsFor('video', { premium }), video_with_reference: creditsFor('video', { premium, reference: true }), narration_per_minute: creditsFor('narration', { premium, seconds: 60 }) },
+        costs: { ideas: creditsFor('contentIdeas', { premium }), image: creditsFor('image', { premium }), video: creditsFor('video', { premium }), video_with_reference: creditsFor('video', { premium, reference: true }), narration_per_minute: creditsFor('narration', { premium, seconds: 60 }), song_per_minute: creditsFor('song', { premium, seconds: 60 }) },
+        options: { age_bands: Object.keys(AGE_BANDS), podcast_minutes: PODCAST_MINUTES, song_seconds: SONG_SECONDS, photo_types: ['memes', 'puzzles', 'kids_collections'] },
         limits: { ideaChars: LIMITS.ideaChars },
         credits: { remaining: status.remaining, limit: status.limit, plan: status.plan.name, resets_at: status.resetsAt },
         video_available: premium, // video is a Pro/Business feature
@@ -129,13 +132,18 @@ router.post('/projects', authenticateToken, (req, res) => {
   if (idea.length < 5) return fail(res, 400, 'Tell Bascardo a little about your idea (a few words is enough).');
   if (idea.length > LIMITS.ideaChars) return fail(res, 400, `Keep the idea under ${LIMITS.ideaChars.toLocaleString()} characters.`);
   const notes = String(req.body?.notes || '').trim().slice(0, LIMITS.notesChars) || null;
+  const imageUrl = HTTPS.test(String(req.body?.image_url || '')) && ['memes', 'puzzles', 'kids_collections'].includes(itemType) ? req.body.image_url : null;
+  const settings = {};
+  if (itemType === 'podcast_box' && PODCAST_MINUTES.includes(Number(req.body?.minutes))) settings.minutes = Number(req.body.minutes);
+  if (itemType === 'kids_collections' && AGE_BANDS[req.body?.age_band]) settings.age_band = req.body.age_band;
+  if (imageUrl) settings.source_image_url = imageUrl;
 
   return runCharged(req, res, { kind: 'concepts', action: 'contentIdeas', itemType }, async () => {
-    const r = await proposeConcepts({ itemType, idea, notes });
-    const { data: project, error } = await supabase.from('content_projects').insert({
-      user_id: req.user.id, item_type: itemType, idea, notes, stage: 'choose',
-      concepts: r.concepts, concepts_seen: r.concepts.map((c) => c.title),
-    }).select().single();
+    const r = await proposeConcepts({ itemType, idea, notes, imageUrl, settings });
+    if (r.photoDescription) settings.photo_description = r.photoDescription;
+    const row = { user_id: req.user.id, item_type: itemType, idea, notes, stage: 'choose', concepts: r.concepts, concepts_seen: r.concepts.map((c) => c.title) };
+    let { data: project, error } = await supabase.from('content_projects').insert({ ...row, settings, media: imageUrl ? { image_url: imageUrl } : {} }).select().single();
+    if (error && /settings/.test(error.message)) ({ data: project, error } = await supabase.from('content_projects').insert(row).select().single()); // before migration 075
     if (error) throw error;
     return { view: { project: projectView(project) }, usage: addUsage({ input: 0, output: 0 }, r.usage) };
   });
@@ -148,7 +156,8 @@ router.post('/projects/:id/ideas', authenticateToken, async (req, res) => {
   const wish = String(req.body?.wish || '').trim().slice(0, LIMITS.notesChars);
   return runCharged(req, res, { kind: 'ideas', action: 'contentIdeas', itemType: project.item_type, projectId: project.id }, async () => {
     const notes = [project.notes, wish && `Now looking for: ${wish}`].filter(Boolean).join('. ') || null;
-    const r = await proposeConcepts({ itemType: project.item_type, idea: project.idea, notes, avoid: project.concepts_seen || [] });
+    const st = project.settings || {};
+    const r = await proposeConcepts({ itemType: project.item_type, idea: st.photo_description ? `${project.idea}\n(The author's photo shows: ${st.photo_description})` : project.idea, notes, avoid: project.concepts_seen || [], settings: st });
     const seen = [...(project.concepts_seen || []), ...r.concepts.map((c) => c.title)].slice(-30);
     const { data: updated, error } = await supabase.from('content_projects')
       .update({ concepts: r.concepts, concepts_seen: seen, updated_at: now() }).eq('id', project.id).select().single();
@@ -174,13 +183,28 @@ router.post('/projects/:id/draft', authenticateToken, async (req, res) => {
 
   const spec = CONTENT_TYPES[project.item_type];
   return runCharged(req, res, { kind: 'draft', action: spec.draftAction, itemType: project.item_type, projectId: project.id }, async () => {
-    const r = await writeDraft({ itemType: project.item_type, idea: project.idea, notes: project.notes, concept, tweak: concept.author_tweak });
+    const st = project.settings || {};
+    let r = await writeDraft({ itemType: project.item_type, idea: project.idea, notes: project.notes, concept, tweak: concept.author_tweak, settings: st });
+    const usage = addUsage({ input: 0, output: 0 }, r.usage);
+    if (spec.verify) {
+      // A puzzle is only "done" when an independent solve agrees with its answer.
+      let v = await verifyPuzzle(r.draft);
+      Object.assign(usage, addUsage(usage, v.usage));
+      if (!v.ok) {
+        r = await writeDraft({ itemType: project.item_type, idea: project.idea, notes: project.notes, concept, tweak: [concept.author_tweak, 'The last version was ambiguous or its answer was wrong: make sure exactly one option is correct.'].filter(Boolean).join(' '), settings: st });
+        Object.assign(usage, addUsage(usage, r.usage));
+        v = await verifyPuzzle(r.draft);
+        Object.assign(usage, addUsage(usage, v.usage));
+      }
+      if (!v.ok) throw new ContentError('Bascardo could not make a puzzle with one clear, correct answer from this idea. Try a different idea or difficulty (you were not charged).', 422);
+      r.draft.verified = 'Checked: solved independently, one clear answer.';
+    }
     const { data: updated, error } = await supabase.from('content_projects').update({
       chosen_concept: concept, draft: r.draft, drafts_made: (project.drafts_made || 0) + 1,
       stage: project.stage === 'posted' ? 'posted' : 'draft', updated_at: now(),
     }).eq('id', project.id).select().single();
     if (error) throw error;
-    return { view: { project: projectView(updated) }, usage: addUsage({ input: 0, output: 0 }, r.usage) };
+    return { view: { project: projectView(updated) }, usage };
   });
 });
 
@@ -253,6 +277,58 @@ router.post('/projects/:id/narrate', authenticateToken, async (req, res) => {
     if (error) throw error;
     return { view: { project: projectView(updated), audio_url: r.audioUrl }, providerCost: r.providerCost, durationSeconds: r.seconds };
   });
+});
+
+// ── Music: make the song itself from the lyrics ─────────────────────────────
+router.post('/projects/:id/song', authenticateToken, async (req, res) => {
+  const project = await loadProject(req.user.id, req.params.id);
+  if (!project) return fail(res, 404, 'Post not found');
+  if (project.item_type !== 'music_box' || !project.draft?.lyrics) return fail(res, 400, 'Write the lyrics first');
+  const seconds = SONG_SECONDS.includes(Number(req.body?.seconds)) ? Number(req.body.seconds) : 60;
+  const instrumental = !!req.body?.instrumental;
+  const style = [project.draft.genre, project.draft.mood, String(req.body?.style || '').slice(0, 200)].filter(Boolean).join(', ') || 'catchy pop song';
+  return runCharged(req, res, { kind: 'song', action: 'song', itemType: project.item_type, projectId: project.id, costOpts: { seconds }, log: { feature: 'voice', provider: 'runware', model: MUSIC_MODEL } }, async () => {
+    const r = await generateSong({ style, lyrics: instrumental ? null : project.draft.lyrics, seconds });
+    const media = { ...(project.media || {}), audio_url: r.audioUrl, audio_seconds: r.seconds };
+    const { data: updated, error } = await supabase.from('content_projects').update({ media, updated_at: now() }).eq('id', project.id).select().single();
+    if (error) throw error;
+    saveToGallery({ userId: req.user.id, kind: 'audio', url: r.audioUrl, feature: 'song', prompt: project.draft.title, model: r.model, durationSeconds: r.seconds, projectKind: 'content', projectId: project.id, role: 'song', provider: 'runware', providerCost: r.cost });
+    return { view: { project: projectView(updated), audio_url: r.audioUrl }, providerCost: r.cost, durationSeconds: r.seconds };
+  });
+});
+
+// ── Memes: draw the caption onto the picture (exact spelling; free) ─────────
+// AI pictures spell badly, so the words are added by Cloudinary, not the model.
+router.post('/projects/:id/meme-image', authenticateToken, async (req, res) => {
+  const project = await loadProject(req.user.id, req.params.id);
+  if (!project) return fail(res, 404, 'Post not found');
+  const src = String(req.body?.image_url || project.media?.image_url || '');
+  const top = String(req.body?.top || '').trim().slice(0, 90);
+  const bottom = String(req.body?.bottom || '').trim().slice(0, 90);
+  if (!HTTPS.test(src)) return fail(res, 400, 'Make or choose the picture first');
+  if (!top && !bottom) return fail(res, 400, 'Write the top or bottom text');
+  try {
+    let publicId;
+    const m = isOurCloudinary(src) && src.match(/\/image\/upload\/(?:.*?\/)?v\d+\/(.+?)\.[a-z0-9]+(\?.*)?$/i);
+    if (m && !/\/l_/.test(src)) publicId = m[1];
+    else publicId = (await cloudinary.uploader.upload(src, { resource_type: 'image', folder: 'bookofmemes/memes/base' })).public_id;
+    // Classic meme text: white, black outline, wrapped inside the picture (checked visually 2026-11-20).
+    const layer = (t, gravity) => [
+      { overlay: { font_family: 'Arial', font_size: 84, font_weight: 'bold', stroke: 'stroke', text_align: 'center', text: t.toUpperCase() }, color: 'white', border: '5px_solid_black', width: 1000, crop: 'fit' },
+      { flags: 'layer_apply', gravity, y: 30 },
+    ];
+    const url = cloudinary.url(publicId, { secure: true, transformation: [{ width: 1080, crop: 'scale' }, ...(top ? layer(top, 'north') : []), ...(bottom ? layer(bottom, 'south') : [])] });
+    const check = await fetch(url);
+    if (!check.ok) throw new Error(`overlay ${check.status} ${check.headers.get('x-cld-error') || ''}`);
+    const kept = await cloudinary.uploader.upload(url, { resource_type: 'image', folder: 'bookofmemes/memes' });
+    const media = { ...(project.media || {}), image_url: kept.secure_url, meme_base_url: src, meme_text: { top, bottom } };
+    const { data: updated } = await supabase.from('content_projects').update({ media, updated_at: now() }).eq('id', project.id).select().single();
+    saveToGallery({ userId: req.user.id, kind: 'image', url: kept.secure_url, feature: 'image', prompt: [top, bottom].filter(Boolean).join(' / '), source: 'ai', projectKind: 'content', projectId: project.id, role: 'meme' });
+    res.json({ success: true, data: { project: projectView(updated), image_url: kept.secure_url } });
+  } catch (err) {
+    console.error('[content] meme image failed:', err.message);
+    fail(res, 500, 'Could not put the text on the picture. Please try again.');
+  }
 });
 
 // Add Content posted it: remember which item it became.

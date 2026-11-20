@@ -28,6 +28,9 @@ import storyRoutes from "./routes/storyRoutes.js";
 import contentStudioRoutes from "./routes/contentStudioRoutes.js";
 import galleryRoutes from "./routes/galleryRoutes.js";
 import studioJobRoutes from "./routes/studioJobRoutes.js";
+import aiCreditRoutes from "./routes/aiCreditRoutes.js";
+import bookRoutes from "./routes/bookRoutes.js";
+import videoStudioRoutes from "./routes/videoStudioRoutes.js";
 import { startJobRunner } from "./utils/studioJobs.js";
 import supportRoutes, { startSupportAlertTimer } from "./routes/supportRoutes.js";
 
@@ -70,6 +73,9 @@ app.use("/api/story", storyRoutes); // Bascardo Story Studio (migration 064)
 app.use("/api/content-studio", contentStudioRoutes); // Bascardo Content Studio (migration 071)
 app.use("/api/gallery", galleryRoutes); // Bascardo Gallery (migration 072)
 app.use("/api/studio", studioJobRoutes); // background jobs for long media work (migration 073)
+app.use("/api/ai/credits", aiCreditRoutes); // AI credits view + top-ups (migration 075)
+app.use("/api/book", bookRoutes); // Book Studio (migration 075)
+app.use("/api/video", videoStudioRoutes); // Video Studio, Pro/Business (migration 075)
 startJobRunner();
 app.use("/api/support", supportRoutes); // admin inbox + WhatsApp alerts (migration 069)
 

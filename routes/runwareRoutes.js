@@ -6,6 +6,7 @@ import { authenticateToken } from '../auth.js';
 import { CREDIT_PRICES, formatCredits, creditsToLogUnits, hasCredits, chargeCredits } from '../utils/credits.js';
 import { creditStatus, spendCredits, creditsView, outOfCreditsMessage, reserveCredits, commitCredits, releaseCredits } from '../utils/aiCredits.js';
 import { registerJobKind, createJob, waitForJob, publicJob, jobsAvailable } from '../utils/studioJobs.js';
+import { shotClipReady, shotClipFailed } from '../utils/videoShots.js';
 import { creditsFor } from '../config/aiPlans.js';
 import { logGeneration } from '../utils/aiGenerationLog.js';
 import { saveToGallery } from '../utils/gallery.js';
@@ -495,9 +496,11 @@ registerJobKind('video_clip', {
       userId: job.user_id, kind: 'video', url: videoUrl, feature: 'video', prompt, model, durationSeconds: VIDEO_FREE_DURATION_SECONDS,
       projectKind: job.project_kind, projectId: job.project_id, role: role || null, provider: 'runware', providerCost: r.cost ?? null, credits: job.credits, jobId: job.id,
     });
-    return { videoUrl, hd, charged, watermarked: !(hd || premium), referenceImageUrl: referenceImageUrl || null };
+    await shotClipReady(job, videoUrl).catch((e) => console.warn('[video] shot update failed:', e.message));
+    return { videoUrl, hd, charged, watermarked: !(hd || premium), referenceImageUrl: referenceImageUrl || null, shot_id: job.input?.shot_id || null };
   },
   failed(job, err) {
+    shotClipFailed(job).catch(() => {});
     logGeneration({ userId: job.user_id, feature: 'video', model: job.input?.hd || job.input?.premium ? AI_MODELS.VIDEO.PREMIUM : AI_MODELS.VIDEO.FREE, provider: 'runware', inputPrompt: job.input?.prompt, tier: job.input?.hd ? 'hd' : 'free', success: false, errorMessage: err.message, latencyMs: Date.now() - new Date(job.created_at).getTime() });
   },
 });
