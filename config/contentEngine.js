@@ -57,7 +57,7 @@ export const CONTENT_TYPES = {
     conceptHint: 'three different jokes or angles on the idea (e.g. relatable struggle, absurd twist, wordplay)',
     draftShape: `"title": "short catchy title", "caption": "the meme text, under 20 words (top/bottom text style or one line)", "description": "1-2 sentences for the post", ${IMAGE_RULE}, ${QUIZ_SHAPE}`,
     check: (d) => (!d.title || !d.caption || !d.image_prompt ? 'missing title/caption/image_prompt' : quizProblem(d.quiz)),
-    toForm: (d) => ({ values: { title: d.title, description: [d.caption, d.description].filter(Boolean).join('\n\n') }, quiz: d.quiz, imageFields: ['image', 'question_image'] }),
+    toForm: (d) => ({ values: { title: d.title, description: [d.caption, d.description].filter(Boolean).join('\n\n') }, quiz: d.quiz, imageFields: ['question_image'] }), // the picture belongs to the question, never the title's cover
   },
   puzzles: {
     label: 'Puzzle', draftAction: 'contentDraftVerified', maxTokens: 1300, media: ['image'], quiz: true, verify: true,
@@ -74,7 +74,7 @@ export const CONTENT_TYPES = {
     conceptHint: 'three different kid-friendly takes (e.g. tiny story, learning activity, fun fact)',
     draftShape: `"title": "short title", "age_range": "e.g. 4-6", "text": "the content, 80-200 words in simple sentences", "lesson": "what the child learns, one line", ${IMAGE_RULE.replace('AI image generator:', 'AI image generator, bright and friendly for children:')}, ${QUIZ_SHAPE.replace('a question about this post that viewers answer', 'a simple question a child can answer by looking at the picture or the text')}`,
     check: (d) => (!d.title || !d.text ? 'missing title/text' : KIDS_UNSAFE.test(`${d.title} ${d.text} ${d.image_prompt || ''} ${JSON.stringify(d.quiz || {})}`) ? 'unsuitable word for children' : quizProblem(d.quiz)),
-    toForm: (d) => ({ values: { title: d.title, description: [d.text, d.lesson && `What we learn: ${d.lesson}`].filter(Boolean).join('\n\n') }, quiz: d.quiz, imageFields: ['question_image', 'cover_image'] }),
+    toForm: (d) => ({ values: { title: d.title, description: [d.text, d.lesson && `What we learn: ${d.lesson}`].filter(Boolean).join('\n\n') }, quiz: d.quiz, imageFields: ['question_image'] }), // the picture belongs to the question, never the title's cover
   },
   music_box: {
     label: 'Music', draftAction: 'contentDraft', maxTokens: 1800, media: ['image', 'audio'], quiz: false,
