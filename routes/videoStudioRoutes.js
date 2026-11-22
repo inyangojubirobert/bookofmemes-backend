@@ -327,7 +327,8 @@ router.post('/assets/image', authenticateToken, async (req, res) => {
   if (!req.body?.owns_rights) return fail(res, 400, 'Confirm you own this picture or have the right to use it.');
   const c = req.body?.crop;
   const crop = c && [c.x, c.y, c.w, c.h].every((v) => Number.isFinite(Number(v))) ? { x: +c.x, y: +c.y, w: +c.w, h: +c.h } : null;
-  if (!req.body?.remove_background) {
+  // A location is a whole place: removing its "background" erases everything.
+  if (!req.body?.remove_background || req.body?.kind === 'location') {
     try { const r = await prepareAssetImage(url, { crop }); return res.json({ success: true, data: { url: r.url, width: r.width, height: r.height } }); }
     catch (err) { console.error('[video] crop:', err.message); return fail(res, 400, 'Could not use that picture. Try another one.'); }
   }

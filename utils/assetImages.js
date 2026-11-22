@@ -46,6 +46,12 @@ export async function prepareAssetImage(sourceUrl, { crop = null, removeBackgrou
     cost = r.cost ?? null;
     // Runware links don't last; keep our own copy.
     const kept = await cloudinary.uploader.upload(r.imageURL, { folder: FOLDER, resource_type: 'image', format: 'png' });
+    // Nothing left (no clear subject, e.g. a room): an all-transparent PNG
+    // compresses to almost nothing. Fail as a 400 so the credits are released.
+    if (kept.bytes < kept.width * kept.height * 0.03) {
+      cloudinary.uploader.destroy(kept.public_id).catch(() => {});
+      throw Object.assign(new Error('Removing the background left nothing — this picture has no single subject. Untick "Remove the background" and save again.'), { status: 400 });
+    }
     url = kept.secure_url; width = kept.width; height = kept.height; publicId = kept.public_id;
   }
   return { url, width, height, publicId, cost };
