@@ -10,6 +10,7 @@ import { supabase } from '../config/db.js';
 import { authenticateToken } from '../auth.js';
 import { creditStatus } from '../utils/aiCredits.js';
 import { AI_PLANS, TOPUP_PACKS, ACTION_COSTS } from '../config/aiPlans.js';
+import { newTitlePayment, payNewTitle, newTitleFeeText, NEW_TITLE_FEE_VIEW } from '../utils/titleFee.js';
 import { hasCredits, chargeCredits, formatCredits } from '../utils/credits.js';
 
 const router = express.Router();
@@ -32,6 +33,28 @@ const view = (status) => ({
 router.get('/', authenticateToken, async (req, res) => {
   try { res.json({ success: true, data: view(await creditStatus(req.user.id)) }); }
   catch (err) { console.error('[ai credits] view:', err.message); fail(res, 500, 'Could not load your AI credits'); }
+});
+
+// The $1 new-title fee for Add Content (the Studios charge it themselves):
+// wallet credits when they cover it, otherwise AI credits (utils/titleFee.js).
+//   GET  /api/ai/credits/new-title   how it would be paid now: { paid_with: 'wallet' | 'ai_credits' | null }
+//   POST /api/ai/credits/new-title   { description, request_id }  takes it
+router.get('/new-title', authenticateToken, async (req, res) => {
+  try { res.json({ success: true, data: { ...NEW_TITLE_FEE_VIEW, paid_with: await newTitlePayment(req.user.id) } }); }
+  catch (err) { console.error('[title fee] check:', err.message); fail(res, 500, 'Could not check your credits'); }
+});
+
+router.post('/new-title', authenticateToken, async (req, res) => {
+  const description = String(req.body?.description || 'New title').slice(0, 200);
+  const rid = REQ_ID.test(String(req.body?.request_id || '')) ? `${req.user.id}:${req.body.request_id}` : null;
+  try {
+    const paidWith = await payNewTitle(req, req.user.id, description, rid);
+    if (!paidWith) return fail(res, 402, `Posting a new title costs ${newTitleFeeText()}. Nothing was charged.`, { code: 'needs_wallet_credits' });
+    res.json({ success: true, data: { paid_with: paidWith, ...NEW_TITLE_FEE_VIEW } });
+  } catch (err) {
+    console.error('[title fee] pay:', err.message);
+    fail(res, 500, 'Could not take the title fee. Nothing was charged.');
+  }
 });
 
 router.post('/topup', authenticateToken, async (req, res) => {

@@ -87,13 +87,20 @@ let ticking = false;
 let timer = null;
 function kick() { setTimeout(tick, 50); }
 
+// Two conditional updates, not one with .or(): this PostgREST rejects an
+// or-filter on a PATCH ("column studio_jobs.locked_until does not exist"),
+// and because that error was ignored no job was ever claimed or run (found
+// 2026-11-22: every video clip sat "queued" forever). Each update is still
+// atomic, so two instances can't both claim the same job.
 async function claim(job) {
-  const { data } = await supabase.from('studio_jobs')
-    .update({ locked_until: later(60000), updated_at: now() })
-    .eq('id', job.id).in('status', ['queued', 'running'])
-    .or(`locked_until.is.null,locked_until.lt."${now()}"`)
-    .select().maybeSingle();
-  return data;
+  const patch = { locked_until: later(60000), updated_at: now() };
+  const base = () => supabase.from('studio_jobs').update(patch).eq('id', job.id).in('status', ['queued', 'running']);
+  const free = await base().is('locked_until', null).select().maybeSingle();
+  if (free.error) console.error('[jobs] claim failed:', free.error.message);
+  if (free.data) return free.data;
+  const stale = await base().lt('locked_until', now()).select().maybeSingle();
+  if (stale.error) console.error('[jobs] claim failed:', stale.error.message);
+  return stale.data;
 }
 
 async function settle(job, patch, reservationAction) {

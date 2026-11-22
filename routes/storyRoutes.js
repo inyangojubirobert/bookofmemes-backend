@@ -19,7 +19,8 @@ import { authenticateToken } from '../auth.js';
 import { creditStatus } from '../utils/aiCredits.js';
 import { runChargedStep } from '../utils/studioSteps.js';
 import { creditsFor } from '../config/aiPlans.js';
-import { chargeCredits, hasCredits, creditsToLogUnits } from '../utils/credits.js';
+import { creditsToLogUnits } from '../utils/credits.js';
+import { newTitlePayment, payNewTitle, newTitleFeeText, NEW_TITLE_PRICE_USD, NEW_TITLE_FEE_VIEW } from '../utils/titleFee.js';
 import { logGeneration } from '../utils/aiGenerationLog.js';
 import {
   planStory, writeChapter, updateMemory, nextIdeas, readExisting, StoryError,
@@ -29,7 +30,6 @@ import {
 const router = express.Router();
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const EDIT_DAYS = 30;
-const NEW_TITLE_PRICE_USD = 1; // same as posting any new title in Add Content
 
 const fail = (res, status, error, extra = {}) => res.status(status).json({ success: false, error, ...extra });
 const now = () => new Date().toISOString();
@@ -102,7 +102,7 @@ router.get('/config', authenticateToken, async (req, res) => {
         },
         credits: { remaining: status.remaining, limit: status.limit, plan: status.plan.name, resets_at: status.resetsAt },
         edit_days: EDIT_DAYS,
-        new_title_price_usd: NEW_TITLE_PRICE_USD,
+        ...NEW_TITLE_FEE_VIEW,
       },
     });
   } catch (err) {
@@ -346,8 +346,8 @@ router.post('/projects/:id/chapters/:cid/publish', authenticateToken, async (req
   let createdStory = null;
   try {
     if (!storyId) {
-      if (!(await hasCredits(userId, NEW_TITLE_PRICE_USD))) {
-        return fail(res, 402, `Publishing a new story costs $${NEW_TITLE_PRICE_USD.toFixed(2)} in credits (like any new title). Later chapters are free.`, { code: 'needs_wallet_credits' });
+      if (!(await newTitlePayment(userId))) {
+        return fail(res, 402, `Publishing a new story costs ${newTitleFeeText()} (like any new title). Later chapters are free.`, { code: 'needs_wallet_credits' });
       }
       const plan = project.plan || {};
       const { data: story, error } = await supabase.from('stories').insert({
@@ -375,11 +375,11 @@ router.post('/projects/:id/chapters/:cid/publish', authenticateToken, async (req
     if (last?.id) await supabase.from('chapters').update({ next_chapter_id: published.id }).eq('id', last.id);
 
     if (createdStory) {
-      const charged = await chargeCredits(req, NEW_TITLE_PRICE_USD, `New Story: ${createdStory.title}`).catch(() => false);
+      const charged = await payNewTitle(req, userId, `New Story: ${createdStory.title}`).catch(() => null);
       if (!charged) {
         await supabase.from('chapters').delete().eq('id', published.id);
         await supabase.from('stories').delete().eq('id', createdStory.id);
-        return fail(res, 402, `Publishing a new story costs $${NEW_TITLE_PRICE_USD.toFixed(2)} in credits. Nothing was published.`, { code: 'needs_wallet_credits' });
+        return fail(res, 402, `Publishing a new story costs ${newTitleFeeText()}. Nothing was published.`, { code: 'needs_wallet_credits' });
       }
     }
 
@@ -402,8 +402,8 @@ async function publishAsBookPage(req, res, project, chapters, ch) {
   let createdBook = null;
   try {
     if (!bookId) {
-      if (!(await hasCredits(userId, NEW_TITLE_PRICE_USD))) {
-        return fail(res, 402, `Publishing a new book costs $${NEW_TITLE_PRICE_USD.toFixed(2)} in credits (like any new title). Later pages are free.`, { code: 'needs_wallet_credits' });
+      if (!(await newTitlePayment(userId))) {
+        return fail(res, 402, `Publishing a new book costs ${newTitleFeeText()} (like any new title). Later pages are free.`, { code: 'needs_wallet_credits' });
       }
       const plan = project.plan || {};
       const { data: book, error } = await supabase.from('books_library').insert({
@@ -429,10 +429,10 @@ async function publishAsBookPage(req, res, project, chapters, ch) {
     if (pErr) throw pErr;
 
     if (createdBook) {
-      const charged = await chargeCredits(req, NEW_TITLE_PRICE_USD, `New Book: ${createdBook.title}`).catch(() => false);
+      const charged = await payNewTitle(req, userId, `New Book: ${createdBook.title}`).catch(() => null);
       if (!charged) {
         await supabase.from('books_library').delete().eq('id', createdBook.id);
-        return fail(res, 402, `Publishing a new book costs $${NEW_TITLE_PRICE_USD.toFixed(2)} in credits. Nothing was published.`, { code: 'needs_wallet_credits' });
+        return fail(res, 402, `Publishing a new book costs ${newTitleFeeText()}. Nothing was published.`, { code: 'needs_wallet_credits' });
       }
     }
     await supabase.from('story_project_chapters').update({ status: 'published', book_page_id: page.id, updated_at: now() }).eq('id', ch.id);

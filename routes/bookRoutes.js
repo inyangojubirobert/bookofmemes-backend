@@ -15,12 +15,11 @@ import { authenticateToken } from '../auth.js';
 import { creditStatus } from '../utils/aiCredits.js';
 import { creditsFor } from '../config/aiPlans.js';
 import { runChargedStep } from '../utils/studioSteps.js';
-import { chargeCredits, hasCredits } from '../utils/credits.js';
+import { newTitlePayment, payNewTitle, newTitleFeeText, NEW_TITLE_FEE_VIEW } from '../utils/titleFee.js';
 import { proposeBooks, writePages, picturePrompt, formatSpec, BOOK_FORMATS, READING_LEVELS, LIMITS, BOOK_MODEL, PROMPT_VERSION, BookError } from '../config/bookEngine.js';
 
 const router = express.Router();
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const NEW_TITLE_PRICE_USD = 1;
 const EDIT_DAYS = 30;
 const fail = (res, status, error, extra = {}) => res.status(status).json({ success: false, error, ...extra });
 const now = () => new Date().toISOString();
@@ -73,7 +72,7 @@ router.get('/config', authenticateToken, async (req, res) => {
       pages_per_batch: LIMITS.pagesPerBatch,
       costs: { concepts: creditsFor('bookConcepts', { premium }), pages_short: creditsFor('bookPagesShort', { premium }), pages_long: creditsFor('bookPagesLong', { premium }), picture: creditsFor('image', { premium }) },
       credits: { remaining: status.remaining, limit: status.limit, topup: status.topup || 0, plan: status.plan.name },
-      new_title_price_usd: NEW_TITLE_PRICE_USD,
+      ...NEW_TITLE_FEE_VIEW,
     } });
   } catch (err) { console.error('[book] config:', err.message); fail(res, 500, 'Could not load Book Studio'); }
 });
@@ -248,10 +247,11 @@ router.post('/projects/:id/publish', authenticateToken, async (req, res) => {
   if (!pages.length) return fail(res, 400, 'Every page is already published');
   let bookId = p.book_id;
   let created = null;
+  let paidWith = null;
   try {
     if (!bookId) {
-      if (!(await hasCredits(userId, NEW_TITLE_PRICE_USD))) {
-        return fail(res, 402, `Publishing a new book costs $${NEW_TITLE_PRICE_USD.toFixed(2)} in credits (like any new title). Adding pages later is free.`, { code: 'needs_wallet_credits' });
+      if (!(await newTitlePayment(userId))) {
+        return fail(res, 402, `Publishing a new book costs ${newTitleFeeText()} (like any new title). Adding pages later is free.`, { code: 'needs_wallet_credits' });
       }
       const { data: book, error } = await supabase.from('books_library').insert({
         author_id: userId, universal_item_type: 'books_library', is_published: true,
@@ -270,10 +270,10 @@ router.post('/projects/:id/publish', authenticateToken, async (req, res) => {
     const { data: inserted, error: pErr } = await supabase.from('book_pages').insert(rows).select('id, page_number');
     if (pErr) throw pErr;
     if (created) {
-      const charged = await chargeCredits(req, NEW_TITLE_PRICE_USD, `New Book: ${created.title}`).catch(() => false);
-      if (!charged) {
+      paidWith = await payNewTitle(req, userId, `New Book: ${created.title}`).catch(() => null);
+      if (!paidWith) {
         await supabase.from('books_library').delete().eq('id', created.id);
-        return fail(res, 402, `Publishing a new book costs $${NEW_TITLE_PRICE_USD.toFixed(2)} in credits. Nothing was published.`, { code: 'needs_wallet_credits' });
+        return fail(res, 402, `Publishing a new book costs ${newTitleFeeText()}. Nothing was published.`, { code: 'needs_wallet_credits' });
       }
     }
     const byNumber = Object.fromEntries((inserted || []).map((r) => [r.page_number, r.id]));
@@ -282,7 +282,7 @@ router.post('/projects/:id/publish', authenticateToken, async (req, res) => {
       await supabase.from('story_project_chapters').update({ status: 'published', book_page_id: byNumber[++k] || null, updated_at: now() }).eq('id', pg.id);
     }
     const { data: updated } = await supabase.from('story_projects').update({ book_id: bookId, updated_at: now() }).eq('id', p.id).select().single();
-    res.json({ success: true, data: await bookView(updated), book_id: bookId, published: pages.length });
+    res.json({ success: true, data: await bookView(updated), book_id: bookId, published: pages.length, paid_with: paidWith });
   } catch (err) {
     console.error('[book] publish failed:', err.message);
     if (created) await supabase.from('books_library').delete().eq('id', created.id).then(() => {}, () => {});

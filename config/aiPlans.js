@@ -153,6 +153,11 @@ export const TOPUP_PACKS = {
 };
 export const CORRECTION_COST_USD = 0.0011;
 
+// The $1 new-title fee when it's paid with AI credits instead of wallet
+// credits (utils/titleFee.js): $1 at the top-up price ($0.05 a credit), so a
+// title never costs less in AI credits than those credits sell for.
+export const NEW_TITLE_AI_CREDITS = 20;
+
 export function creditsFor(action, { premium = false, reference = false, seconds = 0 } = {}) {
   const key = action === 'narration' ? 'narrationPerMinute' : action === 'song' ? 'songPerMinute' : action;
   const c = ACTION_COSTS[key];
