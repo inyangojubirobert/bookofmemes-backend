@@ -5,6 +5,7 @@
 import express from 'express';
 import { supabase } from '../config/db.js';
 import { authenticateToken } from '../auth.js';
+import { searchText, ilikeAny } from '../utils/searchText.js';
 
 const router = express.Router();
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -16,6 +17,8 @@ router.get('/', authenticateToken, async (req, res) => {
     let q = supabase.from('notifications').select('id, type, title, body, reference_id, is_read, created_at')
       .eq('user_id', req.user.id).order('created_at', { ascending: false }).limit(limit);
     if (req.query.before && !Number.isNaN(Date.parse(req.query.before))) q = q.lt('created_at', new Date(req.query.before).toISOString());
+    const text = searchText(req.query.q); // ?q= words in the title or text
+    if (text) q = q.or(ilikeAny(text, ['title', 'body']));
     const [{ data, error }, { count, error: cErr }] = await Promise.all([
       q,
       supabase.from('notifications').select('id', { count: 'exact', head: true }).eq('user_id', req.user.id).eq('is_read', false),

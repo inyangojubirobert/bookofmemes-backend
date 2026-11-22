@@ -17,6 +17,7 @@ import { creditsFor } from '../config/aiPlans.js';
 import { runChargedStep } from '../utils/studioSteps.js';
 import { newTitlePayment, payNewTitle, newTitleFeeText, NEW_TITLE_FEE_VIEW } from '../utils/titleFee.js';
 import { proposeBooks, writePages, picturePrompt, formatSpec, BOOK_FORMATS, READING_LEVELS, LIMITS, BOOK_MODEL, PROMPT_VERSION, BookError } from '../config/bookEngine.js';
+import { searchText, ilikeAny } from '../utils/searchText.js';
 
 const router = express.Router();
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -78,8 +79,11 @@ router.get('/config', authenticateToken, async (req, res) => {
 });
 
 router.get('/projects', authenticateToken, async (req, res) => {
-  const { data, error } = await supabase.from('story_projects').select('id, title, stage, plan, book_id, book_format, updated_at, cover_url')
+  let q = supabase.from('story_projects').select('id, title, stage, plan, book_id, book_format, updated_at, cover_url')
     .eq('user_id', req.user.id).eq('kind', 'book').order('updated_at', { ascending: false }).limit(50);
+  const text = searchText(req.query.q); // ?q= finds older ones past the newest 50
+  if (text) q = q.or(ilikeAny(text, ['title', 'plan->>title']));
+  const { data, error } = await q;
   if (error) return fail(res, 500, 'Could not load your books');
   const ids = (data || []).map((p) => p.id);
   const counts = {};

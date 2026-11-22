@@ -28,6 +28,7 @@ import { prepareAssetImage, BACKGROUND_MODEL } from '../utils/assetImages.js';
 import { callRunwareTasks } from '../utils/runwareClient.js';
 import { AI_MODELS } from '../config/aiModels.js';
 import { v2 as cloudinary } from 'cloudinary';
+import { searchText, ilikeAny } from '../utils/searchText.js';
 
 const router = express.Router();
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -110,8 +111,11 @@ router.get('/config', authenticateToken, async (req, res) => {
 });
 
 router.get('/projects', authenticateToken, async (req, res) => {
-  const { data, error } = await supabase.from('video_projects').select('id, title, target_seconds, status, render_url, updated_at')
+  let q = supabase.from('video_projects').select('id, title, target_seconds, status, render_url, updated_at')
     .eq('user_id', req.user.id).order('updated_at', { ascending: false }).limit(50);
+  const text = searchText(req.query.q); // ?q= finds older ones past the newest 50
+  if (text) q = q.ilike('title', `%${text}%`);
+  const { data, error } = await q;
   if (error) return fail(res, 500, 'Could not load your videos');
   res.json({ success: true, data: data || [] });
 });
@@ -131,8 +135,11 @@ router.delete('/projects/:id', authenticateToken, async (req, res) => {
 
 // Stories the user can turn into a video.
 router.get('/stories', authenticateToken, async (req, res) => {
-  const { data } = await supabase.from('story_projects').select('id, title, plan, kind, updated_at')
+  let q = supabase.from('story_projects').select('id, title, plan, kind, updated_at')
     .eq('user_id', req.user.id).order('updated_at', { ascending: false }).limit(30);
+  const text = searchText(req.query.q); // ?q= finds older ones past the newest 30
+  if (text) q = q.or(ilikeAny(text, ['title', 'plan->>title']));
+  const { data } = await q;
   res.json({ success: true, data: (data || []).map((p) => ({ id: p.id, title: p.plan?.title || p.title || 'Untitled', kind: p.kind || 'story' })) });
 });
 

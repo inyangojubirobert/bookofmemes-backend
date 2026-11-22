@@ -22,6 +22,7 @@ import { creditsFor } from '../config/aiPlans.js';
 import { creditsToLogUnits } from '../utils/credits.js';
 import { newTitlePayment, payNewTitle, newTitleFeeText, NEW_TITLE_PRICE_USD, NEW_TITLE_FEE_VIEW } from '../utils/titleFee.js';
 import { logGeneration } from '../utils/aiGenerationLog.js';
+import { searchText, ilikeAny } from '../utils/searchText.js';
 import {
   planStory, writeChapter, updateMemory, nextIdeas, readExisting, StoryError,
   GENRES, LIMITS, STORY_MODEL, PROMPT_VERSION,
@@ -113,9 +114,12 @@ router.get('/config', authenticateToken, async (req, res) => {
 
 // ── My projects ─────────────────────────────────────────────────────────────
 router.get('/projects', authenticateToken, async (req, res) => {
-  const { data: all, error } = await supabase.from('story_projects')
-    .select('*')
+  let q = supabase.from('story_projects')
+    .select('id, kind, title, plan, stage, story_id, continued_from_story, updated_at')
     .eq('user_id', req.user.id).order('updated_at', { ascending: false }).limit(80);
+  const text = searchText(req.query.q); // ?q= finds older ones past the newest 50
+  if (text) q = q.or(ilikeAny(text, ['title', 'plan->>title']));
+  const { data: all, error } = await q;
   if (error) return fail(res, 500, 'Could not load your stories');
   const data = (all || []).filter((p) => p.kind !== 'book').slice(0, 50); // books live in Book Studio (/api/book)
   const ids = (data || []).map((p) => p.id);
@@ -146,8 +150,11 @@ router.delete('/projects/:id', authenticateToken, async (req, res) => {
 
 // The author's published stories that can be continued.
 router.get('/my-stories', authenticateToken, async (req, res) => {
-  const { data, error } = await supabase.from('stories').select('id, title, story_category, cover_image_url, created_at')
+  let q = supabase.from('stories').select('id, title, story_category, cover_image_url, created_at')
     .eq('author_id', req.user.id).order('created_at', { ascending: false }).limit(50);
+  const text = searchText(req.query.q);
+  if (text) q = q.ilike('title', `%${text}%`);
+  const { data, error } = await q;
   if (error) return fail(res, 500, 'Could not load your stories');
   res.json({ success: true, data: data || [] });
 });

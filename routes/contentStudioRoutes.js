@@ -25,6 +25,7 @@ import { saveToGallery, isOurCloudinary } from '../utils/gallery.js';
 import { generateSong, SONG_SECONDS, MUSIC_MODEL } from '../utils/music.js';
 import { v2 as cloudinary } from 'cloudinary';
 import { narrateScript, speakableText, estimateSeconds, MAX_SCRIPT_CHARS } from '../utils/podcastNarration.js';
+import { searchText, ilikeAny } from '../utils/searchText.js';
 import {
   proposeConcepts, writeDraft, verifyPuzzle, draftToForm, publicTypes, ContentError, AGE_BANDS, PODCAST_MINUTES,
   CONTENT_TYPES, STUDIO_TYPES, LIMITS, CONTENT_MODEL, PROMPT_VERSION,
@@ -100,6 +101,8 @@ router.get('/projects', authenticateToken, async (req, res) => {
   let q = supabase.from('content_projects').select('id, item_type, idea, stage, chosen_concept, draft, published_item_id, updated_at')
     .eq('user_id', req.user.id).order('updated_at', { ascending: false }).limit(50);
   if (STUDIO_TYPES.includes(req.query.item_type)) q = q.eq('item_type', req.query.item_type);
+  const text = searchText(req.query.q); // ?q= finds older ones past the newest 50
+  if (text) q = q.or(ilikeAny(text, ['idea', 'draft->>title', 'chosen_concept->>title']));
   const { data, error } = await q;
   if (error) return fail(res, 500, 'Could not load your posts in progress');
   res.json({

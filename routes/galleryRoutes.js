@@ -1,12 +1,13 @@
 // Bascardo Gallery API (migration 072, utils/gallery.js).
-//   GET    /api/gallery?kind=image|video|audio&before=<iso>   my Bascardo creations and uploads
-//   GET    /api/gallery/posts?kind=image|video|audio          media from my published posts
+//   GET    /api/gallery?kind=image|video|audio&before=<iso>&q=  my Bascardo creations and uploads (q: words in the prompt)
+//   GET    /api/gallery/posts?kind=image|video|audio&q=         media from my published posts (q: words in the title)
 //   POST   /api/gallery   { url, kind }                       keep a file uploaded from the phone
 //   DELETE /api/gallery/:id                                   remove from the gallery (published posts keep their media)
 import express from 'express';
 import { supabase } from '../config/db.js';
 import { authenticateToken } from '../auth.js';
 import { isOurCloudinary } from '../utils/gallery.js';
+import { searchText, ilikeAny } from '../utils/searchText.js';
 
 const router = express.Router();
 const KINDS = ['image', 'video', 'audio'];
@@ -19,6 +20,8 @@ router.get('/', authenticateToken, async (req, res) => {
     .eq('user_id', req.user.id).order('created_at', { ascending: false }).limit(PAGE);
   if (KINDS.includes(req.query.kind)) q = q.eq('kind', req.query.kind);
   if (req.query.before && !Number.isNaN(Date.parse(req.query.before))) q = q.lt('created_at', new Date(req.query.before).toISOString());
+  const text = searchText(req.query.q);
+  if (text) q = q.or(ilikeAny(text, ['prompt', 'feature']));
   const { data, error } = await q;
   if (error) return fail(res, 500, 'Could not load your gallery');
   res.json({ success: true, data: data || [], more: (data || []).length === PAGE });
@@ -37,19 +40,22 @@ const POST_MEDIA = [
 
 router.get('/posts', authenticateToken, async (req, res) => {
   const kind = KINDS.includes(req.query.kind) ? req.query.kind : null;
+  const text = searchText(req.query.q);
   const out = [];
   await Promise.all(POST_MEDIA.map(async ({ table, type, fields }) => {
     const wanted = fields.filter(([, k]) => !kind || k === kind);
     if (!wanted.length) return;
-    const { data } = await supabase.from(table).select(`id, title, created_at, ${wanted.map(([c]) => c).join(', ')}`)
+    let query = supabase.from(table).select(`id, title, created_at, ${wanted.map(([c]) => c).join(', ')}`)
       .eq('author_id', req.user.id).order('created_at', { ascending: false }).limit(40);
+    if (text) query = query.ilike('title', `%${text}%`);
+    const { data } = await query;
     for (const row of data || []) {
       for (const [col, k] of wanted) {
         if (row[col] && /^https:\/\//.test(row[col])) out.push({ id: `${type}:${row.id}:${col}`, kind: k, url: row[col], item_type: type, item_id: row.id, title: row.title, created_at: row.created_at });
       }
     }
   }));
-  if (!kind || kind === 'image') {
+  if ((!kind || kind === 'image') && !text) {
     const { data } = await supabase.from('book_pages').select('id, book_id, page_number, image_url, created_at')
       .eq('author_id', req.user.id).not('image_url', 'is', null).order('created_at', { ascending: false }).limit(40);
     for (const p of data || []) {
