@@ -85,6 +85,9 @@ async function callRunwareTasks(tasks) {
   if (!response.ok || json?.errors?.length) {
     const err = new Error(json?.errors?.[0]?.message || `Runware request failed (${response.status})`);
     err.providerHttpStatus = response.status;
+    // A request Runware rejects as invalid fails the same way every time; a
+    // background job shouldn't retry it (rate limits / 5xx are retried).
+    if (response.status >= 400 && response.status < 500 && response.status !== 429) err.permanent = true;
     throw err;
   }
   return { data: json?.data || [], status: response.status };
@@ -160,14 +163,17 @@ function buildVideoTask(prompt, { hd, premium, referenceImageUrl }) {
     includeCost: true,
   };
 
-  // seedImage/strength for image-to-video, same mechanism the image route
-  // uses (see generateImage above) -- Runware's videoInference accepts a
-  // seedImage URL to animate a starting frame. Strength follows the same
-  // model-family split as images: FLUX-based models need > 0.8 to show any
-  // visible change, others are fine lower.
+  // Image-to-video: the start picture goes in inputs.frameImages as the first
+  // frame. Seedance rejects the old top-level seedImage/strength with 400
+  // "Unsupported use of 'seedImage'" (found 2026-11-22: every shot with a
+  // start picture failed 5 times). With a frame image Runware wants a
+  // resolution preset instead of width/height, and then keeps the picture's
+  // own aspect ratio (bytedance-seedance-2-0 schema.json).
   if (referenceImageUrl) {
-    task.seedImage = referenceImageUrl;
-    task.strength = task.model.startsWith('bfl:') ? 0.85 : 0.7;
+    task.inputs = { frameImages: [{ image: referenceImageUrl, frame: 'first' }] };
+    delete task.width;
+    delete task.height;
+    task.resolution = hd ? '720p' : '480p';
   }
 
   return task;

@@ -140,10 +140,12 @@ async function step(job) {
     if (err.permanent || attempts >= MAX_ATTEMPTS) {
       console.error(`[jobs] ${job.kind} ${job.id} failed:`, err.message);
       try { await handler.failed?.(job, err, ctx); } catch { /* logging only */ }
-      await settle(job, { status: 'failed', error: String(err.userMessage || 'It could not be made this time. You were not charged.').slice(0, 300), attempts }, 'release');
+      // The provider's own message is kept (result.provider_error) so a failure
+      // can be diagnosed from the database without the server logs.
+      await settle(job, { status: 'failed', error: String(err.userMessage || 'It could not be made this time. You were not charged.').slice(0, 300), attempts, result: { provider_error: String(err.message || '').slice(0, 500) } }, 'release');
     } else {
       console.warn(`[jobs] ${job.kind} ${job.id} attempt ${attempts}:`, err.message);
-      await supabase.from('studio_jobs').update({ attempts, next_run_at: later(5000 * 2 ** attempts), locked_until: null, updated_at: now() }).eq('id', job.id);
+      await supabase.from('studio_jobs').update({ attempts, result: { provider_error: String(err.message || '').slice(0, 500) }, next_run_at: later(5000 * 2 ** attempts), locked_until: null, updated_at: now() }).eq('id', job.id);
     }
   }
 }
