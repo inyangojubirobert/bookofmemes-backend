@@ -14,6 +14,15 @@
 --   traits  { age, skin, eyes, hair, build, marks }   (characters)
 -- Safe to run more than once.
 
+-- Stop at once if this is not the Book of Memes database (its project URL
+-- starts with zgyphn…): every other project lacks these tables.
+DO $$
+BEGIN
+  IF to_regclass('public.profiles') IS NULL OR to_regclass('public.video_shots') IS NULL THEN
+    RAISE EXCEPTION 'Wrong Supabase project: this is not Book of Memes. Switch to the project whose URL starts with zgyphn (Project Settings → API) and run 079 there. Nothing was changed.';
+  END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS public.video_assets (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
