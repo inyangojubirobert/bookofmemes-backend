@@ -64,7 +64,9 @@ export const ACTION_COSTS = {
   writing: { fast: 1, premium: 1 },           // captions, titles, scripts
   search: { fast: 2, premium: 2 },            // AI search over app content (longer answers)
   image: { fast: 1, premium: 7, premiumWithReference: 12 },
-  video: { fast: 50, premium: 125, premiumWithReference: 310 }, // Pro/Business only: Free can't make video (routes/runwareRoutes.js)
+  // From a start picture or cast references costs Runware the same as text-to-video (480p, $0.07 a second:
+  // measured $0.37 for 5 s from a start picture on 2026-11-22), so it's no longer priced 2.5x higher.
+  video: { fast: 50, premium: 125, premiumWithReference: 125 }, // Pro/Business only: Free can't make video (routes/runwareRoutes.js)
   narrationPerMinute: { fast: 3, premium: 3 },  // both plans use Fish Audio S2.1 Pro (config/aiModels.js)
   // Story Studio (routes/storyRoutes.js, config/storyEngine.js)
   storyPlan: { fast: 4, premium: 4 },         // read the idea/script, plan the story, offer 3 directions
@@ -87,6 +89,7 @@ export const ACTION_COSTS = {
   videoRender: { fast: 2, premium: 2 },       // join the clips + voice-over/music into one MP4
   // Music (ACE-Step 1.5 XL turbo on Runware)
   songPerMinute: { fast: 1, premium: 1 },     // a song or instrumental, per started minute
+  backgroundRemoval: { fast: 2, premium: 2 }, // cut a cast picture out of its background (ideogram remove-background, $0.01)
 };
 
 // Our worst-case cost per action in USD (Haiku 4.5: $1 / $5 per million input / output tokens):
@@ -121,7 +124,7 @@ export const ACTION_COST_USD = {
   writing: { fast: 0.0045, premium: 0.0045 },
   search: { fast: 0.0112, premium: 0.0112 },
   image: { fast: 0.0006, premium: 0.045, premiumWithReference: 0.075 },
-  video: { fast: 0.30, premium: 0.80, premiumWithReference: 2.0 },
+  video: { fast: 0.30, premium: 0.80, premiumWithReference: 0.80 },
   narrationPerMinute: { fast: 0.015, premium: 0.015 },
   storyPlan: { fast: 0.0252, premium: 0.0252 },
   storyChapter: { fast: 0.0376, premium: 0.0376 },
@@ -138,6 +141,7 @@ export const ACTION_COST_USD = {
   videoPlanWithReference: { fast: 0.0223, premium: 0.0223 },
   videoRender: { fast: 0.0100, premium: 0.0100 },
   songPerMinute: { fast: 0.0023, premium: 0.0023 },
+  backgroundRemoval: { fast: 0.01, premium: 0.01 },
 };
 
 // ── Top-ups: extra AI credits bought with wallet balance ────────────────────

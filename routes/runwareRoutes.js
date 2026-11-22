@@ -6,6 +6,7 @@ import { authenticateToken } from '../auth.js';
 import { CREDIT_PRICES, formatCredits, creditsToLogUnits, hasCredits, chargeCredits } from '../utils/credits.js';
 import { creditStatus, spendCredits, creditsView, outOfCreditsMessage, reserveCredits, commitCredits, releaseCredits } from '../utils/aiCredits.js';
 import { registerJobKind, createJob, waitForJob, publicJob, jobsAvailable } from '../utils/studioJobs.js';
+import { callRunwareTasks } from '../utils/runwareClient.js';
 import { shotClipReady, shotClipFailed } from '../utils/videoShots.js';
 import { creditsFor } from '../config/aiPlans.js';
 import { logGeneration } from '../utils/aiGenerationLog.js';
@@ -48,7 +49,6 @@ import { AI_MODELS } from '../config/aiModels.js';
 
 const router = express.Router();
 
-const RUNWARE_API_URL = 'https://api.runware.ai/v1';
 const RUNWARE_API_KEY = process.env.RUNWARE_API_KEY;
 
 cloudinary.config({
@@ -70,28 +70,8 @@ const VIDEO_FREE_DURATION_SECONDS = 5;
 const VIDEO_HD_COST = CREDIT_PRICES.videoHd; // video runs far more than images provider-side -- priced accordingly
 const VIDEO_HD_REFERENCE_COST = CREDIT_PRICES.videoHdWithReference;
 
-// Returns { data, status } -- status is the raw HTTP status Runware
-// responded with, carried through so callers can log it even on success (not
-// just failure), e.g. to later ask "which model gets 200s slower than others."
-// On failure, the thrown Error carries the same status as `.providerHttpStatus`
-// so route handlers can still log it from their catch block.
-async function callRunwareTasks(tasks) {
-  const response = await fetch(RUNWARE_API_URL, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${RUNWARE_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(tasks),
-  });
-  const json = await response.json().catch(() => null);
-  if (!response.ok || json?.errors?.length) {
-    const err = new Error(json?.errors?.[0]?.message || `Runware request failed (${response.status})`);
-    err.providerHttpStatus = response.status;
-    // A request Runware rejects as invalid fails the same way every time; a
-    // background job shouldn't retry it (rate limits / 5xx are retried).
-    if (response.status >= 400 && response.status < 500 && response.status !== 429) err.permanent = true;
-    throw err;
-  }
-  return { data: json?.data || [], status: response.status };
-}
+// callRunwareTasks → { data, status } (utils/runwareClient.js); a thrown
+// error carries .providerHttpStatus and .permanent for invalid requests.
 
 async function generateImage(prompt, { hd, premium, referenceImageUrl }) {
   // When a reference image is provided, use FLUX Redux -- the Runware model
@@ -143,7 +123,7 @@ async function generateImage(prompt, { hd, premium, referenceImageUrl }) {
   };
 }
 
-function buildVideoTask(prompt, { hd, premium, referenceImageUrl }) {
+function buildVideoTask(prompt, { hd, premium, referenceImageUrl, referenceImages = null }) {
   const useHdModel = hd || premium;
   const task = {
     taskType: 'videoInference',
@@ -171,6 +151,13 @@ function buildVideoTask(prompt, { hd, premium, referenceImageUrl }) {
   // own aspect ratio (bytedance-seedance-2-0 schema.json).
   if (referenceImageUrl) {
     task.inputs = { frameImages: [{ image: referenceImageUrl, frame: 'first' }] };
+    delete task.width;
+    delete task.height;
+    task.resolution = hd ? '720p' : '480p';
+  } else if (Array.isArray(referenceImages) && referenceImages.length) {
+    // Video Studio cast (config/videoCast.js): cropped character / location /
+    // prop pictures, at most 9. Can't be combined with a start picture.
+    task.inputs = { referenceImages: referenceImages.slice(0, 9) };
     delete task.width;
     delete task.height;
     task.resolution = hd ? '720p' : '480p';
@@ -470,8 +457,8 @@ const status = await creditStatus(userId);
 registerJobKind('video_clip', {
   pollEveryMs: 5000,
   async start(job) {
-    const { prompt, hd, premium, referenceImageUrl } = job.input;
-    const task = buildVideoTask(prompt, { hd, premium, referenceImageUrl });
+    const { prompt, hd, premium, referenceImageUrl, referenceImages } = job.input;
+    const task = buildVideoTask(prompt, { hd, premium, referenceImageUrl, referenceImages });
     // Keep our own task id: polling resumes with it after a restart.
     await callRunwareTasks([{ ...task, taskUUID: job.provider_task_id || task.taskUUID }]);
     return { provider: 'runware', providerTaskId: task.taskUUID, model: task.model };
