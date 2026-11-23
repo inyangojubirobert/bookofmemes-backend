@@ -95,7 +95,7 @@ export const ACTION_COSTS = {
   // Auto Episode Engine (config/episodeEngine.js, utils/episodePipeline.js, migration 084)
   episodeBreakdown: { fast: 9, premium: 9 },      // script → cast, scenes, shots, lines, sounds (episodes up to ~2 min)
   episodeBreakdownLong: { fast: 15, premium: 15 }, // ... for 3-5 minute episodes (up to 60 shots)
-  keyframe: { fast: 13, premium: 13 },            // a shot's still from the cast references + the continuity check of it
+  keyframe: { fast: 13, premium: 13 },            // a shot's still + its continuity check, with 3 references (typical); charged by references sent (REF_PRICING)
   stillMotion: { fast: 1, premium: 1 },           // turn a keyframe into a moving shot (slow zoom / pan)
   episodeRender: { fast: 4, premium: 4 },         // assemble scenes, title and end cards, music into the episode
   episodeLedger: { fast: 3, premium: 3 },         // write the continuity ledger for the next episode
@@ -189,10 +189,23 @@ export const CORRECTION_COST_USD = 0.0011;
 // title never costs less in AI credits than those credits sell for.
 export const NEW_TITLE_AI_CREDITS = 20;
 
-export function creditsFor(action, { premium = false, reference = false, seconds = 0, units = 1 } = {}) {
+// Pictures made from reference pictures (FLUX.2 [pro]) cost $0.03 + $0.015 for every
+// reference sent — measured 2026-11-23: 0 refs $0.03, 2 → $0.06, 4 → $0.09, 9 → $0.165.
+// A shot with a full cast sends up to 9, so these are priced by the number sent, never flat.
+export const REF_PRICING = {
+  image: { baseUsd: 0.03, perRefUsd: 0.015 },      // Video Studio still preview (Model 1)
+  keyframe: { baseUsd: 0.0375, perRefUsd: 0.015 }, // episode keyframe + its continuity check (Haiku vision ≤ $0.0075)
+};
+export const refCredits = (action, refs) => {
+  const r = REF_PRICING[action];
+  return Math.ceil((r.baseUsd + r.perRefUsd * Math.max(0, Math.min(9, Math.round(refs)))) / CREDIT_COST_CEILING_USD);
+};
+
+export function creditsFor(action, { premium = false, reference = false, seconds = 0, units = 1, refs } = {}) {
   const key = action === 'narration' ? 'narrationPerMinute' : action === 'song' ? 'songPerMinute' : action === 'sfx' ? 'sfxPerSecond' : action;
   const c = ACTION_COSTS[key];
   if (!c) throw new Error(`unknown AI action ${action}`);
+  if (premium && refs !== undefined && REF_PRICING[key] && (refs > 0 || key === 'keyframe')) return refCredits(key, refs) * Math.max(1, Math.floor(units) || 1);
   let n = premium ? (reference && c.premiumWithReference ? c.premiumWithReference : c.premium) : c.fast;
   if (action === 'narration' || action === 'song') n *= Math.max(1, Math.ceil(seconds / 60));
   if (action === 'sfx') n *= Math.max(1, Math.ceil(seconds));

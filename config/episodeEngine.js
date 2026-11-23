@@ -272,7 +272,8 @@ export function estimateCredits({ seconds, visual_mode, newCast = 3 }, creditsFo
   const parts = {
     breakdown: creditsFor(range.max > 24 ? 'episodeBreakdownLong' : 'episodeBreakdown', { premium: true }),
     cast: newCast * creditsFor('image', { premium: true }),
-    keyframes: stills * creditsFor('keyframe', { premium: true }),
+    keyframes: stills * creditsFor('keyframe', { premium: true }), // 3 references each (typical); charged by references sent
+    redraws: Math.ceil(stills * 0.2) * creditsFor('keyframe', { premium: true }), // allowance: ~1 in 5 fails its check and is redrawn once
     clips: clips * creditsFor('video', { premium: true, reference: true }),
     motion: (stills - clips) * creditsFor('stillMotion', { premium: true }),
     voices: Math.round(range.target * 1.2) * creditsFor('voiceLine', { premium: true }),

@@ -249,14 +249,13 @@ router.post('/:id/shots/:sid/redraw', authenticateToken, requirePlan, async (req
   if (shot.status !== 'planned') return fail(res, 400, 'This shot is already animated. Edit it in the Video Studio instead.');
   const visual = typeof req.body?.visual === 'string' && req.body.visual.trim() ? req.body.visual.trim().slice(0, 600) : shot.visual;
   const status = req.creditStatus;
-  const cost = creditsFor('keyframe', { premium: true });
+  const { data: assetRows } = await supabase.from('video_assets').select('*').eq('user_id', req.user.id).limit(500);
+  const assets = Object.fromEntries((assetRows || []).map((x) => [x.id, x]));
+  const a = assembleShot(p, { ...shot, visual }, assets, { maxChars: 2800 });
+  const cost = creditsFor('keyframe', { premium: true, refs: a.references.length }); // priced by references sent
   const reservation = await reserveCredits(req.user.id, status.plan, cost, `epredraw:${crypto.randomUUID()}`);
   if (!reservation) return fail(res, 402, outOfCreditsMessage(status, cost), { code: 'out_of_credits' });
   try {
-    const { data: assetRows } = await supabase.from('video_assets').select('*').eq('user_id', req.user.id).limit(500);
-    const assets = Object.fromEntries((assetRows || []).map((a) => [a.id, a]));
-    const s2 = { ...shot, visual };
-    const a = assembleShot(p, s2, assets, { maxChars: 2800 });
     const prompt = `A single film frame from an episode. ${lightText(shot.light)}\n${a.prompt}`;
     const [width, height] = { landscape: [1024, 576], portrait: [576, 1024], square: [1024, 1024] }[p.aspect] || [1024, 576];
     const { data } = await callRunwareTasks([{ taskType: 'imageInference', taskUUID: crypto.randomUUID(), model: AI_MODELS.IMAGE.PREMIUM, width, height, numberResults: 1, outputFormat: 'JPG', includeCost: true, positivePrompt: prompt.slice(0, 3000), ...(a.references.length ? { inputs: { referenceImages: a.references } } : {}) }]);

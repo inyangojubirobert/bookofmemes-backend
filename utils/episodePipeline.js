@@ -48,7 +48,7 @@ export const STAGES = [
 const NEXT = Object.fromEntries(STAGES.map((s, i) => [s.id, STAGES[i + 1]?.id || 'done']));
 const now = () => new Date().toISOString();
 const IMAGE_SIZE = { landscape: [1024, 576], portrait: [576, 1024], square: [1024, 1024] };
-const MAX_KEYFRAME_TRIES = 3;
+const MAX_KEYFRAME_TRIES = 2; // the first drawing + one automatic redraw if the check fails
 const MOVE_BY_KIND = { establishing: 'pull', dialogue: 'push', reaction: 'close', action: 'pan', insert: 'close', transition: 'tilt' };
 
 class Pause extends Error { constructor(code, message) { super(message); this.code = code; } }
@@ -251,8 +251,7 @@ const STAGE_RUN = {
     progress(p, shots.length - todo.length, shots.length, todo.length ? `Drawing shot ${todo[0].number} of ${shots.length}…` : 'Keyframes ready');
     if (!todo.length) return true;
     const [width, height] = IMAGE_SIZE[p.aspect] || IMAGE_SIZE.landscape;
-    await Promise.all(todo.slice(0, 3).map((shot) => charged(p, 'keyframe', { key: `kf:${shot.number}` }, async () => {
-      const a = assembleShot(p, shot, assets, { maxChars: 2800 });
+    await Promise.all(todo.slice(0, 3).map((shot) => ({ shot, a: assembleShot(p, shot, assets, { maxChars: 2800 }) })).map(({ shot, a }) => charged(p, 'keyframe', { key: `kf:${shot.number}`, opts: { refs: a.references.length } }, async () => {
       const prompt = `A single film frame from an episode. ${lightText(shot.light)}\n${a.prompt}`;
       const pic = await draw({ prompt, references: a.references, size: [width, height], folder: 'bookofmemes/video-studio/keyframes' });
       // Continuity check against each character's reference picture and the never-show list.

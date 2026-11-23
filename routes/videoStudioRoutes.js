@@ -505,7 +505,7 @@ router.post('/projects/:id/shots/:sid/still', authenticateToken, requireVideoPla
   const a = assembleShot(p, shot, assets, { maxChars: 3000 });
   const [width, height] = STILL_SIZE[p.aspect] || STILL_SIZE.landscape;
   const model = AI_MODELS.IMAGE.PREMIUM;
-  return runCharged(req, res, { kind: 'still', action: 'image', projectId: p.id, costOpts: { reference: a.references.length > 0 }, log: { feature: 'image', provider: 'runware', model } }, async () => {
+  return runCharged(req, res, { kind: 'still', action: 'image', projectId: p.id, costOpts: { reference: a.references.length > 0, refs: a.references.length }, log: { feature: 'image', provider: 'runware', model } }, async () => {
     const task = {
       taskType: 'imageInference', taskUUID: crypto.randomUUID(), model, width, height, numberResults: 1, outputFormat: 'JPG', includeCost: true,
       positivePrompt: `A single film frame, the first frame of this shot.\n${[lightText(shot.light || p.light), a.prompt].filter(Boolean).join(' ')}`,

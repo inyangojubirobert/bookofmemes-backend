@@ -5,7 +5,7 @@
 // Defaults: 3% of users pay, free users use 50% of their credits, payers 70%.
 // Costs are the worst-case USD per action in config/aiPlans.js
 // (ACTION_COST_USD); Google keeps 15% of subscriptions.
-import { AI_PLANS, ACTION_COSTS, ACTION_COST_USD, CREDIT_COST_CEILING_USD, CORRECTION_COST_USD, TOPUP_PACKS } from '../config/aiPlans.js';
+import { AI_PLANS, ACTION_COSTS, ACTION_COST_USD, CREDIT_COST_CEILING_USD, CORRECTION_COST_USD, TOPUP_PACKS, REF_PRICING, refCredits } from '../config/aiPlans.js';
 
 const [conv = 3, freeUse = 50, paidUse = 70] = process.argv.slice(2).map(Number);
 const GOOGLE_FEE = 0.15;
@@ -59,6 +59,15 @@ for (const p of Object.values(TOPUP_PACKS)) {
   const flags = [per < bestPlanPerCredit - 1e-9 && 'CHEAPER THAN A PLAN', net < worstAny && 'LOSES MONEY'].filter(Boolean);
   if (flags.length) ok = false;
   console.log(`  ${p.id.padEnd(14)} ${String(p.credits).padStart(4)} credits $${p.priceUsd.toFixed(2)} = $${per.toFixed(4)}/credit, after Google's cut $${net.toFixed(4)} (${Math.round(net / worstAny)}x worst cost)${flags.length ? '  ✘ ' + flags.join(', ') : ''}`);
+}
+
+// Pictures priced by the number of references sent (0-9): each count must pay for itself.
+console.log('\nPictures from references (priced per reference sent)');
+for (const [a, r] of Object.entries(REF_PRICING)) {
+  const worst = Math.max(...[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => (r.baseUsd + r.perRefUsd * n) / refCredits(a, n)));
+  const okRef = worst <= CREDIT_COST_CEILING_USD + 1e-9;
+  if (!okRef) ok = false;
+  console.log(`  ${okRef ? '✔' : '✘'} ${a}: ${refCredits(a, 0)}-${refCredits(a, 9)} credits for 0-9 references, worst $${worst.toFixed(4)}/credit`);
 }
 
 // Free plan: can a free user finish one thing in each studio within its credits?
