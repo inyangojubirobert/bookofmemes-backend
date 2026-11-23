@@ -215,16 +215,40 @@ router.post('/projects', authenticateToken, requireVideoPlan, async (req, res) =
     catch { return fail(res, 400, 'Could not read that reference video. Try another one.'); }
   }
   const frames = refVideo ? referenceFrames(refVideo) : [];
+  // Sound & light plan (on unless the app says no): music theme 'auto' | 'none' | a theme id; narrator voice.
+  const wantSound = req.body?.sound_plan !== false;
+  const musicChoice = String(req.body?.music_theme || 'auto');
+  const sound = wantSound ? {
+    musicTheme: musicChoice === 'none' || musicChoice === 'auto' || MUSIC_THEMES.some((t) => t.id === musicChoice) ? musicChoice : 'auto',
+    voiceId: VOICES.some((v) => v.id === req.body?.voice_id) ? req.body.voice_id : null,
+  } : null;
 
   return runCharged(req, res, { kind: 'plan', action: frames.length ? 'videoPlanWithReference' : 'videoPlan' }, async () => {
-    const r = await planVideo({ idea: idea || 'Turn this story into a video.', storyContext, targetSeconds: b.targetSeconds, frames });
+    const r = await planVideo({ idea: idea || 'Turn this story into a video.', storyContext, targetSeconds: b.targetSeconds, frames, sound });
+    const sp = r.plan.sound_plan;
+    // Applied at once, all free and all changeable: library sounds on each shot, its lighting
+    // and tone, the narrator, and a free library track for the music theme (unless "no music").
+    const theme = sp ? (sound.musicTheme === 'none' ? null : sound.musicTheme !== 'auto' ? sound.musicTheme : sp.music_theme) : null;
+    const track = theme ? LIBRARY.music.find((m) => m.id === theme) : null;
+    const soundFields = sp ? {
+      voice: cleanVoice({ voice_id: sound.voiceId || sp.voice_id, tone: sp.tone }),
+      finish: { music_level: 'low' },
+      ...(track ? { music_url: track.url, music_title: track.title, music_history: [{ url: track.url, title: track.title, at: now(), planned: true }] } : {}),
+    } : {};
+    const shotSound = (i) => {
+      const x = sp?.shots?.[i];
+      if (!x) return {};
+      const sfx = x.sfx.map((f) => { const lib = LIBRARY.sfx.find((l) => l.id === f.id); return lib ? { id: lib.id, label: lib.label, url: lib.url, public_id: lib.public_id, seconds: lib.seconds, lead_in: lib.lead_in, at: f.at, level: 'normal' } : null; }).filter(Boolean);
+      return { voice_tone: x.tone, light: x.light, sfx };
+    };
     const { data: project, error } = await supabase.from('video_projects').insert({
       user_id: req.user.id, title: r.plan.title, idea: idea || '(from a story)', source_kind: storyId ? 'story' : frames.length ? 'reference' : 'idea', source_id: storyId,
       target_seconds: b.targetSeconds, clip_seconds: b.clipSeconds, model: b.model, logline: r.plan.logline, look_card: r.plan.look_card, fit_note: r.plan.fit_note || null,
       reference: frames.length ? { video_url: refVideo, frames, description: r.plan.reference_style, how: 'analysed from 3 frames, not given to the video model' } : null,
+      ...soundFields,
     }).select().single();
     if (error) throw error;
-    const { error: sErr } = await supabase.from('video_shots').insert(r.plan.shots.map((s) => ({ ...s, project_id: project.id, duration_seconds: b.clipSeconds })));
+    const { error: sErr } = await supabase.from('video_shots').insert(r.plan.shots.map((s, i) => ({ ...s, ...shotSound(i), project_id: project.id, duration_seconds: b.clipSeconds })));
     if (sErr) { await supabase.from('video_projects').delete().eq('id', project.id); throw sErr; }
     const u = r.usage;
     return { data: { project: await view(project) }, projectId: project.id, providerCost: Number((u.input / 1e6 + u.output * 5 / 1e6).toFixed(6)) };

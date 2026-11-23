@@ -84,8 +84,8 @@ export const ACTION_COSTS = {
   bookPagesShort: { fast: 2, premium: 2 },    // up to 4 picture-book / early-reader / poetry pages
   bookPagesLong: { fast: 4, premium: 4 },     // up to 4 chapter-book / guide pages
   // Video Studio (config/videoEngine.js); clips use the video price, Pro/Business only
-  videoPlan: { fast: 3, premium: 3 },         // storyline -> shot list fitted to the chosen length
-  videoPlanWithReference: { fast: 4, premium: 4 }, // ... plus reading 3 frames of a reference video
+  videoPlan: { fast: 5, premium: 5 },         // storyline -> shot list fitted to the chosen length + its sound & light plan (083)
+  videoPlanWithReference: { fast: 6, premium: 6 }, // ... plus reading 3 frames of a reference video
   videoRender: { fast: 2, premium: 2 },       // join the clips + voice-over/music into one MP4
   // Music (ACE-Step 1.5 XL turbo on Runware)
   songPerMinute: { fast: 1, premium: 1 },     // a song or instrumental, per started minute
@@ -117,8 +117,9 @@ export const ACTION_COSTS = {
 //   bookConcepts     ≤2.5k input + 3,000 output (3 concepts, ≤12-page plans, identity) ≈ $0.0175
 //   bookPagesShort   ≤4k input (plan, identity, memory) + 1,200 output (4 short pages)   ≈ $0.0100
 //   bookPagesLong    ≤4k input + 3,800 output (4 pages of ≤380 words; measured 2,987)    ≈ $0.0230
-//   videoPlan        ≤5k input (storyline or story memory) + 2,500 output (≤12 shots)    ≈ $0.0175
-//   videoPlanWithReference  + 3 video frames read (≈4.8k input)                           ≈ $0.0223
+//   videoPlan        ≤8k input (storyline + the 50-sound/voice/theme catalog) + 4,000 output (≤12 shots with
+//                    sound & light plan; measured 1.7k in / 1.2k out for 4 shots on 2026-11-23) ≈ $0.0280
+//   videoPlanWithReference  + 3 video frames read (≈4.8k input)                           ≈ $0.0328
 //   videoRender      Cloudinary splice (measured 4 s for 2 clips; plan quota, not per call) ≈ $0.0100 budget
 //   sfxPerSecond     Mirelo SFX 1.5, measured $0.01 a second (2 s $0.02, 10 s $0.10, a 5 s clip $0.05)
 //   voiceLine        Fish Audio S2.1 pro, ≤400 characters ≈ 27 s at $0.0135 a minute (measured $0.0014 a line) ≈ $0.0061
@@ -142,8 +143,8 @@ export const ACTION_COST_USD = {
   bookConcepts: { fast: 0.0175, premium: 0.0175 },
   bookPagesShort: { fast: 0.0100, premium: 0.0100 },
   bookPagesLong: { fast: 0.0230, premium: 0.0230 },
-  videoPlan: { fast: 0.0175, premium: 0.0175 },
-  videoPlanWithReference: { fast: 0.0223, premium: 0.0223 },
+  videoPlan: { fast: 0.0280, premium: 0.0280 },
+  videoPlanWithReference: { fast: 0.0328, premium: 0.0328 },
   videoRender: { fast: 0.0100, premium: 0.0100 },
   songPerMinute: { fast: 0.0023, premium: 0.0023 },
   backgroundRemoval: { fast: 0.01, premium: 0.01 },
