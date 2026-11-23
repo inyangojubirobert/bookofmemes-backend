@@ -225,6 +225,6 @@ export async function animateStill({ imageId, seconds, move = 'push', aspect = '
 
 /** Public id of an image on our Cloudinary (or null). */
 export function imagePublicId(url) {
-  const m = String(url || '').match(new RegExp(`res\.cloudinary\.com/${process.env.CLOUDINARY_CLOUD_NAME}/image/upload/(?:[^/]+/)*?(?:v\d+/)(.+?)\.[a-z0-9]+$`, 'i'));
+  const m = String(url || '').match(new RegExp(`res\\.cloudinary\\.com/${process.env.CLOUDINARY_CLOUD_NAME}/image/upload/(?:[^/]+/)*?(?:v\\d+/)(.+?)\\.[a-z0-9]+$`, 'i'));
   return m ? m[1] : null;
 }

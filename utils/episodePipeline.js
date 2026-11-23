@@ -283,9 +283,22 @@ const STAGE_RUN = {
         // pieces of herself") can read as unsafe out of context: retry once with only how people look.
         a = assembleShot(p, shot, looksOnly(assets), { maxChars: 2800 });
         prompt = `A single film frame from an episode. ${lightText(shot.light)}\n${a.prompt}`;
-        try { pic = await draw({ prompt, references: a.references, size: [width, height], folder: 'bookofmemes/video-studio/keyframes' }); }
-        catch (err2) { if (isRefusal(err2)) throw new Refused(shot); throw err2; }
-        log(p, `Shot ${shot.number}: drawn from the characters' looks only (the image model's safety filter refused the full description).`);
+        try {
+          pic = await draw({ prompt, references: a.references, size: [width, height], folder: 'bookofmemes/video-studio/keyframes' });
+          log(p, `Shot ${shot.number}: drawn from the characters' looks only (the image model's safety filter refused the full description).`);
+        } catch (err2) {
+          if (!isRefusal(err2)) throw err2;
+          // Still refused: the filter objects to a character's reference PICTURES (tested 2026-11-23:
+          // the same shot passed without them). Draw it from the place/props pictures and the
+          // characters' written looks; the face may vary a little.
+          const charPics = new Set((shot.cast_slots?.characters || []).flatMap((c) => [...(assets[c.id]?.refs || []).map((r) => r.url), ...(assets[c.id]?.states || []).map((x) => x.url)]).filter(Boolean));
+          const refs = a.references.filter((u) => !charPics.has(u));
+          try { pic = await draw({ prompt, references: refs, size: [width, height], folder: 'bookofmemes/video-studio/keyframes' }); }
+          catch (err3) { if (isRefusal(err3)) throw new Refused(shot); throw err3; }
+          a = { ...a, references: refs };
+          const who = (shot.cast_slots?.characters || []).map((c) => assets[c.id]?.name).filter(Boolean).join(', ');
+          log(p, `Shot ${shot.number}: the image model's safety filter refuses the reference pictures of ${who || 'a character'}, so it was drawn from their written looks (the face may vary). Replacing those pictures in the Cast library fixes it.`);
+        }
       }
       // Continuity check against each character's reference picture and the never-show list.
       const chars = (shot.cast_slots?.characters || []).map((c) => ({ name: assets[c.id]?.name, ref: assets[c.id]?.refs?.find((r) => r.slot === 'front')?.url })).filter((c) => c.name);
@@ -304,6 +317,12 @@ const STAGE_RUN = {
       if (r.status === 'fulfilled') continue;
       if (r.reason instanceof Refused) {
         const shot = r.reason.shot;
+        if (shot.still_url) {
+          // A redraw (after a failed check) was refused: keep the drawing it already had.
+          await supabase.from('video_shots').update({ qc: { ok: false, notes: `${shot.qc?.notes || 'Check this shot'}. Kept the first drawing: the redraw was refused by the image model's safety filter.`, tries: MAX_KEYFRAME_TRIES }, updated_at: now() }).eq('id', shot.id);
+          log(p, `Shot ${shot.number}: kept its first drawing (the redraw was refused); please check it.`);
+          continue;
+        }
         await supabase.from('video_shots').update({ included: false, qc: { ok: false, refused: true, notes: "The image model's safety filter refused this shot. Change its description and redraw it in the Video Studio.", tries: (shot.qc?.tries || 0) + 1 }, updated_at: now() }).eq('id', shot.id);
         log(p, `Shot ${shot.number} left out: the image model's safety filter refused it even from the characters' looks (not charged). Rewrite it and redraw it in the Video Studio to put it back.`);
       } else throw r.reason;
