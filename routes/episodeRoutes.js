@@ -26,7 +26,8 @@ import { AI_MODELS } from '../config/aiModels.js';
 import { assembleShot } from '../config/videoCast.js';
 import { lightText, VOICES, MUSIC_THEMES, LOOKS, ASPECTS, validVoiceId } from '../config/soundStudio.js';
 import { customVoiceMap, publicCustomVoice } from '../utils/customVoices.js';
-import { GENRE_PACKS, FORMATS, VISUAL_MODES, DRAMA_MODES, ART_STYLES, LIMITS, estimateCredits, EPISODE_MODEL } from '../config/episodeEngine.js';
+import { GENRE_PACKS, FORMATS, VISUAL_MODES, DRAMA_MODES, ART_STYLES, LIMITS, estimateCredits, EPISODE_MODEL, AUTOMATION_PREMIUM } from '../config/episodeEngine.js';
+const capOf = (v) => { const n = Math.round(Number(v)); return Number.isFinite(n) && n > 0 ? Math.min(n, 1000000) : null; };
 import { STAGES, advanceEpisode, kickEpisodes } from '../utils/episodePipeline.js';
 import fs from 'fs';
 
@@ -64,6 +65,10 @@ function episodeView(p, shots = []) {
     id: p.id, title: p.title, logline: p.logline, cut_note: p.fit_note, series_id: p.series_id, episode_number: p.episode_number,
     aspect: p.aspect, render_url: p.render_url, render_seconds: p.render_seconds, settings: p.settings,
     status: pl.status, stage: pl.stage, message: pl.message, progress: pl.progress || null, credits_used: pl.credits_used || 0,
+    // Pay as you go: the running bill (first attempts incl. the automation premium, redraws and
+    // failed attempts at base price), the user's cap, and the final total once finished.
+    billing: { first: 0, premium: 0, redraws: 0, failed: 0, steps: 0, ...(pl.billing || {}) }, spend_cap: p.settings?.spend_cap || null,
+    premium_pct: Math.round(AUTOMATION_PREMIUM * 100), final_total: pl.status === 'done' ? pl.credits_used || 0 : null,
     estimate: pl.estimate || null, thumbnail: pl.thumbnail || null, log: (pl.log || []).slice(-25),
     stages: STAGES.filter((s) => s.id !== 'storyboard' || p.settings?.review_storyboard).map((s) => {
       const i = STAGES.findIndex((x) => x.id === s.id);
@@ -98,6 +103,7 @@ router.get('/options', authenticateToken, async (req, res) => {
     music: MUSIC_THEMES.map((t) => ({ id: t.id, label: t.label, url: LIBRARY.music.find((m) => m.id === t.id)?.url || null })),
     series: series || [], cast: (assets || []).map((a) => ({ id: a.id, kind: a.kind, name: a.name, picture: a.refs?.[0]?.url || null, voice_id: a.voice_id || null })),
     limits: { script_chars: LIMITS.scriptChars },
+    premium_pct: Math.round(AUTOMATION_PREMIUM * 100),
     prices: { image: unit('image'), keyframe: unit('keyframe'), clip: unit('video', { reference: true }), still_motion: unit('stillMotion'), voice_line: unit('voiceLine'), breakdown: unit('episodeBreakdown'), breakdown_long: unit('episodeBreakdownLong'), render: unit('episodeRender'), ledger: unit('episodeLedger'), scan: unit('writing') },
   } });
 });
@@ -186,6 +192,7 @@ router.post('/', authenticateToken, requirePlan, async (req, res) => {
     art_style: ss.art_style || (ART_STYLES[b.art_style] ? b.art_style : 'cinematic'),
     narrator_voice: ss.narrator_voice || (validVoiceId(b.narrator_voice) ? b.narrator_voice : 'adrian'),
     review_storyboard: b.review_storyboard !== false, captions: b.captions !== false, cliffhanger: b.cliffhanger !== false, title_card: b.title_card !== false,
+    spend_cap: capOf(b.spend_cap), // optional: pause when the episode has spent this much
     cast_map: castMap,
     // A voice per script name (built-in or the user's custom voice): "ELLIE" → "custom:…".
     voice_map: Object.fromEntries(Object.entries(b.voice_map || {}).filter(([n, id]) => String(n).trim() && validVoiceId(id)).slice(0, 15).map(([n, id]) => [String(n).trim().slice(0, 60), id])),
@@ -231,11 +238,20 @@ router.post('/:id/continue', authenticateToken, requirePlan, async (req, res) =>
   const pl = { ...(p.pipeline || {}) };
   if (pl.status === 'done') return fail(res, 400, 'This episode is finished. Edit it in the Video Studio.');
   if (pl.stage === 'storyboard') pl.storyboard_approved = true;
+  // Raise (or clear, with 0) the spending cap when carrying on after it was reached.
+  let settings = p.settings;
+  if (req.body?.spend_cap !== undefined) {
+    settings = { ...(p.settings || {}), spend_cap: capOf(req.body.spend_cap) };
+    await supabase.from('video_projects').update({ settings }).eq('id', p.id);
+  }
+  if (pl.status === 'cap_reached' && settings?.spend_cap && (pl.credits_used || 0) >= settings.spend_cap) {
+    return fail(res, 400, `You've used ${pl.credits_used} of your ${settings.spend_cap}-credit cap. Raise the cap to carry on.`, { code: 'cap_reached' });
+  }
   pl.status = 'running'; pl.fails = {}; pl.message = 'Continuing…';
   pl.log = [...(pl.log || []), { at: now(), text: pl.stage === 'storyboard' ? 'Storyboard approved.' : 'Continued.' }].slice(-60);
   await supabase.from('video_projects').update({ pipeline: pl, updated_at: now() }).eq('id', p.id);
   kickEpisodes();
-  res.json({ success: true, data: episodeView({ ...p, pipeline: pl }) });
+  res.json({ success: true, data: episodeView({ ...p, settings, pipeline: pl }) });
 });
 
 router.post('/:id/pause', authenticateToken, async (req, res) => {
@@ -269,7 +285,10 @@ router.post('/:id/shots/:sid/redraw', authenticateToken, requirePlan, async (req
     const kept = await cloudinary.uploader.upload(data[0].imageURL, { folder: 'bookofmemes/video-studio/keyframes', resource_type: 'image' });
     await supabase.from('video_shots').update({ visual, still_url: kept.secure_url, start_image_url: shot.motion === 'clip' ? kept.secure_url : null, qc: { ok: true, notes: 'redrawn by you', tries: (shot.qc?.tries || 0) + 1 }, compiled: { ...(shot.compiled || {}), prompt, references: a.references, labels: a.labels }, updated_at: now() }).eq('id', shot.id);
     await commitCredits(req.user.id, reservation);
-    const pl = { ...(p.pipeline || {}), credits_used: (p.pipeline?.credits_used || 0) + cost };
+    // A redraw the user asked for: base price, no automation premium.
+    const billing = { first: 0, premium: 0, redraws: 0, failed: 0, steps: 0, ...(p.pipeline?.billing || {}) };
+    billing.redraws += cost; billing.steps += 1;
+    const pl = { ...(p.pipeline || {}), billing, credits_used: (p.pipeline?.credits_used || 0) + cost };
     await supabase.from('video_projects').update({ pipeline: pl, updated_at: now() }).eq('id', p.id);
     const { data: shots } = await supabase.from('video_shots').select('*').eq('project_id', p.id).order('number');
     res.json({ success: true, data: episodeView({ ...p, pipeline: pl }, shots || []) });

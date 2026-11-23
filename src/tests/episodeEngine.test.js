@@ -60,3 +60,13 @@ assert.strictEqual(captionText({ lines: [{ text: 'Rent, girl.' }, { text: 'Today
 assert.ok(captionText({ lines: [{ text: 'w '.repeat(30) }] }).endsWith('…'));
 
 console.log('episodeEngine: all 6 groups passed');
+
+// 7. Pay as you go with the automation premium (owner's decision: 30% on first attempts only).
+const { AUTOMATION_PREMIUM, withPremium } = await import('../../config/episodeEngine.js');
+assert.strictEqual(AUTOMATION_PREMIUM, 0.3);
+assert.strictEqual(withPremium(100), 130); assert.strictEqual(withPremium(13), 17, 'rounded up, never down');
+const est = estimateCredits({ seconds: 60, visual_mode: 'stills', newCast: 3 }, creditsFor);
+assert.strictEqual(est.range.low, withPremium(est.base), 'low end = every step once, with the premium');
+assert.ok(est.range.high > est.range.low && est.total >= est.range.low && est.total <= est.range.high);
+assert.strictEqual(est.redraws % creditsFor('keyframe', { premium: true }), 0, 'redraws are at base price (no premium)');
+console.log('episodeEngine: pay-as-you-go pricing passed');

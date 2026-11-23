@@ -28,7 +28,7 @@ import { renderFilm, joinParts, makeCard, animateStill, imagePublicId } from './
 import { AI_MODELS } from '../config/aiModels.js';
 import { assembleShot, cleanAsset } from '../config/videoCast.js';
 import { lightText, VOICES } from '../config/soundStudio.js';
-import { breakdownScript, updateLedger, checkKeyframe, GENRE_PACKS, ART_STYLES, EPISODE_MODEL } from '../config/episodeEngine.js';
+import { breakdownScript, updateLedger, checkKeyframe, GENRE_PACKS, ART_STYLES, EPISODE_MODEL, EpisodeError, AUTOMATION_PREMIUM, withPremium } from '../config/episodeEngine.js';
 
 cloudinary.config({ cloud_name: process.env.CLOUDINARY_CLOUD_NAME, api_key: process.env.CLOUDINARY_API_KEY, api_secret: process.env.CLOUDINARY_API_SECRET });
 
@@ -85,28 +85,60 @@ function progress(p, done, total, message) {
   if (message) p.pipeline.message = message;
 }
 
-/** Reserve → work → commit; release on failure. Pauses the episode when credits run out. */
-async function charged(p, action, { units = 1, key, opts = {} }, work) {
+/** Adds to the episode's running bill (shown live in the app, and as the final total). */
+export function bill(p, kind, credits, premium = 0) {
+  const b = (p.pipeline.billing ||= { first: 0, premium: 0, redraws: 0, failed: 0, steps: 0 });
+  b[kind] = (b[kind] || 0) + credits;
+  b.premium += premium;
+  b.steps += 1;
+  p.pipeline.credits_used = (p.pipeline.credits_used || 0) + credits;
+}
+
+/** Pauses before a step that would go over the user's spending cap for this episode. */
+function checkCap(p, cost) {
+  const cap = Number(p.settings?.spend_cap) || 0;
+  const used = p.pipeline.credits_used || 0;
+  if (cap && used + cost > cap) {
+    throw new Pause('cap_reached', `Spending cap reached: ${used} of your ${cap}-credit cap used, and the next step costs ${cost}. Raise the cap to carry on.`);
+  }
+}
+
+/**
+ * Pay as you go: reserve → work → commit, one step at a time.
+ *   attempt 1   base price + the automation premium (AUTOMATION_PREMIUM, 30%)
+ *   attempt 2+  a redraw: base price
+ * If the step fails after the provider already produced (and charged for) something,
+ * work() sets spend.spent and the attempt is billed at base price; otherwise nothing is charged.
+ * Out of credits or over the cap → the episode pauses with its progress saved.
+ */
+async function charged(p, action, { units = 1, key, opts = {}, attempt = 1 }, work) {
   const status = await creditStatus(p.user_id);
   if (!status.plan.premiumModels) throw new Pause('needs_plan', 'Auto episodes are part of the Bascardo AI Pro and Business plans.');
-  const cost = creditsFor(action, { premium: true, ...opts }) * Math.max(1, units);
-  const short = `This step needs ${cost} AI credits; you have ${status.remaining}. Get more credits, then tap Continue.`;
+  const base = creditsFor(action, { premium: true, ...opts }) * Math.max(1, units);
+  const first = attempt <= 1;
+  const cost = first ? withPremium(base) : base;
+  checkCap(p, cost);
+  const short = `This step needs ${cost} AI credits; you have ${status.remaining}. Top up, then tap Continue: the episode carries on from here.`;
   if (status.remaining < cost) throw new Pause('needs_credits', short);
   const reservation = await reserveCredits(p.user_id, status.plan, cost, `ep:${p.id}:${key}:${crypto.randomUUID().slice(0, 8)}`, 30);
   if (!reservation) throw new Pause('needs_credits', short);
+  const spend = { spent: false };
   try {
-    const out = await work();
+    const out = await work(spend);
     await commitCredits(p.user_id, reservation);
-    p.pipeline.credits_used = (p.pipeline.credits_used || 0) + cost;
+    bill(p, first ? 'first' : 'redraws', cost, cost - base);
     return out;
   } catch (err) {
-    await releaseCredits(reservation);
+    if (spend.spent && !(err instanceof Pause)) {
+      await commitCredits(p.user_id, reservation, base); // a failed attempt the provider charged for: base price
+      bill(p, 'failed', base);
+    } else await releaseCredits(reservation);
     throw err;
   }
 }
 
 /** One FLUX.2 [pro] picture, kept on our Cloudinary. */
-async function draw({ prompt, references = [], size, folder }) {
+async function draw({ prompt, references = [], size, folder, spend = null }) {
   const [width, height] = size;
   const model = AI_MODELS.IMAGE.PREMIUM;
   const task = {
@@ -124,6 +156,7 @@ async function draw({ prompt, references = [], size, folder }) {
     if (got?.imageURL) r = got;
   }
   if (!r?.imageURL) throw new Error('No picture came back');
+  if (spend) spend.spent = true; // the picture exists: it's paid for even if keeping it fails
   const kept = await cloudinary.uploader.upload(r.imageURL, { folder, resource_type: 'image' });
   return { url: kept.secure_url, publicId: kept.public_id, cost: r.cost ?? null, model };
 }
@@ -140,10 +173,17 @@ const STAGE_RUN = {
     const { data: series } = p.series_id ? await supabase.from('video_series').select('*').eq('id', p.series_id).maybeSingle() : { data: null };
     const s = p.settings || {};
     const action = s.seconds > 120 ? 'episodeBreakdownLong' : 'episodeBreakdown';
-    const r = await charged(p, action, { key: 'breakdown' }, () => breakdownScript({
-      script: p.script, settings: s, ledger: series?.ledger || {},
-      cast: assets.filter((a) => a.kind !== 'prop' || (s.cast_map && Object.values(s.cast_map).includes(a.id))).slice(0, 40).map((a) => ({ name: a.name, kind: a.kind, description: a.description })),
-    }));
+    const r = await charged(p, action, { key: 'breakdown' }, async (spend) => {
+      try {
+        return await breakdownScript({
+          script: p.script, settings: s, ledger: series?.ledger || {},
+          cast: assets.filter((a) => a.kind !== 'prop' || (s.cast_map && Object.values(s.cast_map).includes(a.id))).slice(0, 40).map((a) => ({ name: a.name, kind: a.kind, description: a.description })),
+        });
+      } catch (err) {
+        if (err instanceof EpisodeError) spend.spent = true; // the model answered (unusably): those calls were paid for
+        throw err;
+      }
+    });
     const b = r.breakdown;
     logGeneration({ userId: p.user_id, feature: 'text', model: EPISODE_MODEL, provider: 'anthropic', tier: 'premium', success: true, inputPrompt: `episode:breakdown ${p.id}` }).catch?.(() => {});
     p.pipeline.breakdown = b;
@@ -183,14 +223,14 @@ const STAGE_RUN = {
     const todo = wanted.filter((w) => !p.pipeline.cast[`${w.kind}:${w.name}`]);
     progress(p, wanted.length - todo.length, wanted.length, todo.length ? `Casting ${todo.slice(0, 3).map((w) => w.name).join(', ')}…` : 'Cast ready');
     if (todo.length) {
-      await Promise.all(todo.slice(0, 3).map((w) => charged(p, 'image', { key: `cast:${w.kind}:${w.name}` }, async () => {
+      await Promise.all(todo.slice(0, 3).map((w) => charged(p, 'image', { key: `cast:${w.kind}:${w.name}` }, async (spend) => {
         const c = w.src;
         const style = styleOf(p);
         const pic = w.kind === 'character'
-          ? await draw({ size: [1024, 1024], folder: 'bookofmemes/video-studio/cast', prompt: `Character reference portrait for a film. ${c.name}: ${Object.values(c.traits || {}).join(', ')}. ${c.description}. Wearing ${c.outfit || 'everyday clothes'}. Head and shoulders, facing the camera, neutral expression, plain light-grey studio background, soft even light, sharp focus. ${style}${c.never_show?.length ? ` Avoid: ${c.never_show.join(', ')}.` : ''}` })
+          ? await draw({ spend, size: [1024, 1024], folder: 'bookofmemes/video-studio/cast', prompt: `Character reference portrait for a film. ${c.name}: ${Object.values(c.traits || {}).join(', ')}. ${c.description}. Wearing ${c.outfit || 'everyday clothes'}. Head and shoulders, facing the camera, neutral expression, plain light-grey studio background, soft even light, sharp focus. ${style}${c.never_show?.length ? ` Avoid: ${c.never_show.join(', ')}.` : ''}` })
           : w.kind === 'location'
-            ? await draw({ size: [1024, 576], folder: 'bookofmemes/video-studio/cast', prompt: `Establishing wide shot of a film location, no people. ${c.name}: ${c.description}. ${c.layout ? `Layout: ${c.layout}.` : ''} ${c.era ? `Era: ${c.era}.` : ''} ${style}` })
-            : await draw({ size: [1024, 1024], folder: 'bookofmemes/video-studio/cast', prompt: `A single object on a plain white background, centred, studio product photo: ${c.name}, ${c.description}. ${style}` });
+            ? await draw({ spend, size: [1024, 576], folder: 'bookofmemes/video-studio/cast', prompt: `Establishing wide shot of a film location, no people. ${c.name}: ${c.description}. ${c.layout ? `Layout: ${c.layout}.` : ''} ${c.era ? `Era: ${c.era}.` : ''} ${style}` })
+            : await draw({ spend, size: [1024, 1024], folder: 'bookofmemes/video-studio/cast', prompt: `A single object on a plain white background, centred, studio product photo: ${c.name}, ${c.description}. ${style}` });
         const { row, error } = cleanAsset(w.kind, {
           name: c.name, description: c.description || '', traits: c.traits, never_show: c.never_show, layout: c.layout,
           refs: [{ slot: w.kind === 'character' ? 'front' : w.kind === 'location' ? 'wide' : 'cutout', url: pic.url }],
@@ -272,11 +312,11 @@ const STAGE_RUN = {
     progress(p, shots.length - todo.length, shots.length, todo.length ? `Drawing shot ${todo[0].number} of ${shots.length}…` : 'Keyframes ready');
     if (!todo.length) return true;
     const [width, height] = IMAGE_SIZE[p.aspect] || IMAGE_SIZE.landscape;
-    const results = await Promise.allSettled(todo.slice(0, 3).map((shot) => ({ shot, a0: assembleShot(p, shot, assets, { maxChars: 2800 }) })).map(({ shot, a0 }) => charged(p, 'keyframe', { key: `kf:${shot.number}`, opts: { refs: a0.references.length } }, async () => {
+    const results = await Promise.allSettled(todo.slice(0, 3).map((shot) => ({ shot, a0: assembleShot(p, shot, assets, { maxChars: 2800 }) })).map(({ shot, a0 }) => charged(p, 'keyframe', { key: `kf:${shot.number}`, opts: { refs: a0.references.length }, attempt: (shot.qc?.tries || 0) + 1 }, async (spend) => {
       let a = a0;
       let prompt = `A single film frame from an episode. ${lightText(shot.light)}\n${a.prompt}`;
       let pic;
-      try { pic = await draw({ prompt, references: a.references, size: [width, height], folder: 'bookofmemes/video-studio/keyframes' }); }
+      try { pic = await draw({ spend, prompt, references: a.references, size: [width, height], folder: 'bookofmemes/video-studio/keyframes' }); }
       catch (err) {
         if (!isRefusal(err)) throw err;
         // The image model's safety filter refused it. Story descriptions (e.g. a teenager "who sells
@@ -284,7 +324,7 @@ const STAGE_RUN = {
         a = assembleShot(p, shot, looksOnly(assets), { maxChars: 2800 });
         prompt = `A single film frame from an episode. ${lightText(shot.light)}\n${a.prompt}`;
         try {
-          pic = await draw({ prompt, references: a.references, size: [width, height], folder: 'bookofmemes/video-studio/keyframes' });
+          pic = await draw({ spend, prompt, references: a.references, size: [width, height], folder: 'bookofmemes/video-studio/keyframes' });
           log(p, `Shot ${shot.number}: drawn from the characters' looks only (the image model's safety filter refused the full description).`);
         } catch (err2) {
           if (!isRefusal(err2)) throw err2;
@@ -293,7 +333,7 @@ const STAGE_RUN = {
           // characters' written looks; the face may vary a little.
           const charPics = new Set((shot.cast_slots?.characters || []).flatMap((c) => [...(assets[c.id]?.refs || []).map((r) => r.url), ...(assets[c.id]?.states || []).map((x) => x.url)]).filter(Boolean));
           const refs = a.references.filter((u) => !charPics.has(u));
-          try { pic = await draw({ prompt, references: refs, size: [width, height], folder: 'bookofmemes/video-studio/keyframes' }); }
+          try { pic = await draw({ spend, prompt, references: refs, size: [width, height], folder: 'bookofmemes/video-studio/keyframes' }); }
           catch (err3) { if (isRefusal(err3)) throw new Refused(shot); throw err3; }
           a = { ...a, references: refs };
           const who = (shot.cast_slots?.characters || []).map((c) => assets[c.id]?.name).filter(Boolean).join(', ');
@@ -345,8 +385,10 @@ const STAGE_RUN = {
     const status = await creditStatus(p.user_id);
     // Moving clips: image-to-video from the keyframe, as background jobs (same runner as Mode 1).
     for (const shot of shots.filter((x) => x.motion === 'clip' && x.status === 'planned' && x.still_url).slice(0, 4)) {
-      const cost = creditsFor('video', { premium: true, reference: true });
-      if (status.remaining < cost) throw new Pause('needs_credits', `A moving clip needs ${cost} AI credits; you have ${status.remaining}. Get more credits, then tap Continue.`);
+      const base = creditsFor('video', { premium: true, reference: true });
+      const cost = withPremium(base); // first attempt (a failed clip becomes an animated still, never retried)
+      checkCap(p, cost);
+      if (status.remaining < cost) throw new Pause('needs_credits', `A moving clip needs ${cost} AI credits; you have ${status.remaining}. Top up, then tap Continue: the episode carries on from here.`);
       const reservation = await reserveCredits(p.user_id, status.plan, cost, `ep:${p.id}:clip:${shot.number}:${crypto.randomUUID().slice(0, 6)}`, 30);
       if (!reservation) throw new Pause('needs_credits', 'Not enough AI credits for the moving clips.');
       try {
@@ -356,13 +398,18 @@ const STAGE_RUN = {
           projectKind: 'video', projectId: p.id, reservation, credits: cost,
         });
         await supabase.from('video_shots').update({ status: 'generating', job_id: job.id, updated_at: now() }).eq('id', shot.id);
-        p.pipeline.credits_used = (p.pipeline.credits_used || 0) + cost;
+        bill(p, 'first', cost, cost - base); // reserved now; the job commits it when the clip is made, or releases it
         status.remaining -= cost;
       } catch (err) { await releaseCredits(reservation); throw err; }
     }
     // A clip that failed (not charged) becomes an animated still instead.
     for (const shot of shots.filter((x) => x.motion === 'clip' && x.status === 'failed')) {
       await supabase.from('video_shots').update({ motion: 'still', status: 'planned', updated_at: now() }).eq('id', shot.id);
+      // The job released its credits (the provider made nothing): take it back off the running bill.
+      const base = creditsFor('video', { premium: true, reference: true });
+      const b = (p.pipeline.billing ||= { first: 0, premium: 0, redraws: 0, failed: 0, steps: 0 });
+      b.first = Math.max(0, b.first - withPremium(base)); b.premium = Math.max(0, b.premium - (withPremium(base) - base));
+      p.pipeline.credits_used = Math.max(0, (p.pipeline.credits_used || 0) - withPremium(base));
       log(p, `Shot ${shot.number}: the moving clip failed (not charged); using an animated still.`);
     }
     // Animated stills: a slow camera move over the keyframe, exactly as long as the shot.
@@ -383,8 +430,9 @@ const STAGE_RUN = {
     progress(p, all.length - todo.length, all.length, todo.length ? `Recording line ${all.length - todo.length + 1} of ${all.length}…` : 'Voices recorded');
     if (!todo.length) return true;
     const batch = todo.slice(0, 6);
-    await charged(p, 'voiceLine', { units: batch.length, key: `vo:${batch[0].shot.number}:${batch[0].i}` }, async () => {
+    await charged(p, 'voiceLine', { units: batch.length, key: `vo:${batch[0].shot.number}:${batch[0].i}` }, async (spend) => {
       const results = await Promise.all(batch.map(({ l }) => speakLine(l.say || l.text, { voiceId: l.voice_id, tone: l.tone || 'natural', userId: p.user_id })));
+      spend.spent = true; // every line was spoken: paid for even if saving fails
       const byShot = new Map();
       batch.forEach(({ shot, i }, k) => {
         const lines = byShot.get(shot.id) || [...shot.lines];
@@ -435,8 +483,9 @@ const STAGE_RUN = {
     if (!p.series_id) return true;
     const { data: series } = await supabase.from('video_series').select('*').eq('id', p.series_id).maybeSingle();
     if (!series) return true;
-    await charged(p, 'episodeLedger', { key: 'ledger' }, async () => {
-      const r = await updateLedger({ ledger: series.ledger || {}, breakdown: p.pipeline.breakdown, episodeNumber: p.episode_number || series.episode_count + 1 });
+    await charged(p, 'episodeLedger', { key: 'ledger' }, async (spend) => {
+      const r = await updateLedger({ ledger: series.ledger || {}, breakdown: p.pipeline.breakdown, episodeNumber: p.episode_number || series.episode_count + 1 })
+        .catch((err) => { if (err instanceof SyntaxError) spend.spent = true; throw err; });
       await supabase.from('video_series').update({ ledger: r.ledger, episode_count: Math.max(series.episode_count, p.episode_number || 0), updated_at: now() }).eq('id', series.id);
       log(p, 'Story bible updated for the next episode.');
     });
