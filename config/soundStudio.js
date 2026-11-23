@@ -84,19 +84,68 @@ export function tonedText(text, toneId) {
   return sentences.map((s) => `${t.cue} ${s.trim()}`).join(' ');
 }
 
-/** Runware task fields for one line. speed: the user's choice × the tone's own pace. */
-export function voiceTask(text, { voiceId, tone, speed = 1 } = {}) {
-  const v = voiceById(voiceId);
+// Custom voices (migration 086): "custom:<uuid>", a user's own recorded voice. Fish Audio
+// speaks any line in it from the sample + its transcript (inputs.referenceVoices).
+export const CUSTOM_VOICE_RE = /^custom:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const isCustomVoice = (id) => CUSTOM_VOICE_RE.test(String(id || ''));
+/** A voice id the app may send: a built-in voice or a custom one (ownership is checked when it speaks). */
+export const validVoiceId = (id) => !!VOICE_BY_ID[id] || isCustomVoice(id);
+export const CUSTOM_SAMPLE_SCRIPT = 'The rain had stopped, but the street still remembered it. Somewhere a door creaked open, and someone called my name. I took a deep breath, smiled, and stepped out into the morning light. Whatever happens today, I am ready for it.';
+
+/**
+ * Runware task fields for one line. speed: the user's choice × the tone's own pace.
+ * custom: { id, name, gender, sample_url, transcript } for a custom voice (then no preset voice is sent).
+ */
+export function voiceTask(text, { voiceId, tone, speed = 1, custom = null } = {}) {
   const t = toneById(tone);
   const pace = Math.min(2, Math.max(0.5, Number((Number(speed || 1) * t.speed).toFixed(2))));
+  if (custom) {
+    return {
+      voice: { id: `custom:${custom.id}`, name: custom.name, gender: custom.gender || 'male', custom: true },
+      speech: { text: tonedText(text, t.id), speed: pace }, settings: { temperature: t.temperature },
+      inputs: { referenceVoices: [{ audio: custom.sample_url, text: custom.transcript }] },
+    };
+  }
+  const v = voiceById(voiceId);
   return { voice: v, speech: { text: tonedText(text, t.id), voice: v.fish, speed: pace }, settings: { temperature: t.temperature } };
 }
 
+/**
+ * Naming convention for who says a line: "NAME: words". A shot's narration may hold several,
+ * e.g. "ELLIE: Another day. NARRATOR: She didn't know yet." Only known names count as speakers
+ * (so "Note: ..." stays plain narration). Returns [{ speaker, text }] (speaker null = narrator).
+ */
+export function parseSpeakers(text, knownNames = []) {
+  const src = String(text || '').trim();
+  if (!src) return [];
+  const names = [...new Set(['NARRATOR', ...knownNames].map((n) => String(n || '').trim()).filter(Boolean))].sort((a, b) => b.length - a.length);
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`(^|[\\s.!?"'])(${names.map(esc).join('|')})\\s*:\\s*`, 'gi');
+  const out = [];
+  let last = 0, speaker = null, m;
+  while ((m = re.exec(src))) {
+    const start = m.index + m[1].length;
+    const before = src.slice(last, start).trim();
+    if (before) out.push({ speaker, text: before });
+    const found = names.find((n) => n.toLowerCase() === m[2].toLowerCase());
+    speaker = found && found.toUpperCase() !== 'NARRATOR' ? found : null;
+    last = re.lastIndex;
+  }
+  const rest = src.slice(last).trim();
+  if (rest) out.push({ speaker, text: rest });
+  return out;
+}
+
 export function cleanVoice(input = {}, prev = {}) {
-  const voice_id = VOICE_BY_ID[input.voice_id] ? input.voice_id : (prev.voice_id || DEFAULT_VOICE);
+  const voice_id = validVoiceId(input.voice_id) ? input.voice_id : (prev.voice_id || DEFAULT_VOICE);
   const tone = TONE_BY_ID[input.tone] ? input.tone : (prev.tone || 'natural');
   const sp = Number(input.speed ?? prev.speed ?? 1);
-  return { voice_id, tone, speed: SPEEDS.includes(sp) ? sp : 1 };
+  // cast: who speaks with which voice, by the name used in "NAME: line" (naming convention).
+  const castIn = input.cast && typeof input.cast === 'object' ? input.cast : prev.cast || {};
+  const cast = Object.fromEntries(Object.entries(castIn)
+    .map(([name, id]) => [String(name).trim().slice(0, 40), id])
+    .filter(([name, id]) => name && !/^narrator$/i.test(name) && validVoiceId(id)).slice(0, 12));
+  return { voice_id, tone, speed: SPEEDS.includes(sp) ? sp : 1, ...(Object.keys(cast).length ? { cast } : {}) };
 }
 
 // ── Music ───────────────────────────────────────────────────────────────────

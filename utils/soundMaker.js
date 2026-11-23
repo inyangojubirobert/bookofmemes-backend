@@ -7,7 +7,8 @@ import crypto from 'crypto';
 import { v2 as cloudinary } from 'cloudinary';
 import { callRunwareTasks } from './runwareClient.js';
 import { silenceBounds } from './audioOnset.js';
-import { VOICE_MODEL, FALLBACK_FISH, voiceTask, SFX_MAX_SECONDS } from '../config/soundStudio.js';
+import { VOICE_MODEL, FALLBACK_FISH, voiceTask, SFX_MAX_SECONDS, isCustomVoice } from '../config/soundStudio.js';
+import { getCustomVoice } from './customVoices.js';
 
 cloudinary.config({ cloud_name: process.env.CLOUDINARY_CLOUD_NAME, api_key: process.env.CLOUDINARY_API_KEY, api_secret: process.env.CLOUDINARY_API_SECRET });
 
@@ -21,18 +22,27 @@ async function keep(url, folder) {
   return { url: up.secure_url, public_id: up.public_id, seconds: Number(up.duration) || 0 };
 }
 
-/** One spoken line. Returns { url, public_id, seconds, lead_in, cost, model, voice }. */
-export async function speakLine(text, { voiceId, tone, speed, folder = 'bookofmemes/video-studio/voice' } = {}) {
+/**
+ * One spoken line. Returns { url, public_id, seconds, lead_in, cost, model, voice }.
+ * voiceId may be a custom voice ("custom:<uuid>", migration 086): it must belong to userId.
+ */
+export async function speakLine(text, { voiceId, tone, speed, userId = null, folder = 'bookofmemes/video-studio/voice' } = {}) {
   const clean = String(text || '').trim();
   if (clean.length < 2) throw known('This line has no words to say.');
-  const t = voiceTask(clean, { voiceId, tone, speed });
+  let custom = null;
+  if (isCustomVoice(voiceId)) {
+    custom = await getCustomVoice(userId, voiceId);
+    if (!custom) throw known('That custom voice was removed. Choose another voice.');
+  }
+  const t = voiceTask(clean, { voiceId, tone, speed, custom });
   const run = (voice) => callRunwareTasks([{
     taskType: 'audioInference', taskUUID: crypto.randomUUID(), model: VOICE_MODEL, outputFormat: 'MP3', includeCost: true,
-    speech: { ...t.speech, voice }, settings: t.settings,
+    speech: custom ? t.speech : { ...t.speech, voice }, settings: t.settings, ...(custom ? { inputs: t.inputs } : {}),
   }]);
   let data;
   try { ({ data } = await run(t.speech.voice)); }
   catch (err) {
+    if (custom) throw err; // never swap someone's own voice for another one silently
     // A community voice can be removed by its owner: use the matching preset.
     const fb = FALLBACK_FISH[t.voice.gender] || FALLBACK_FISH.male;
     if (!err.permanent || fb === t.speech.voice) throw err;

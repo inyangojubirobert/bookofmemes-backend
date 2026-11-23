@@ -202,11 +202,19 @@ const STAGE_RUN = {
     const voices = { ...(bible.voices || {}) };
     const narrator = s.narrator_voice || 'adrian';
     const used = new Set([narrator, ...Object.values(voices)]);
+    // Who speaks with which voice, strongest first: the user's choice in setup (by script name,
+    // may be a custom voice), the character template's own voice, the series, then a free pick.
+    const chosen = (name) => Object.entries(s.voice_map || {}).find(([n]) => sameName(n, name))?.[1] || null;
     for (const c of b.characters) {
       const id = p.pipeline.cast[`character:${c.name}`];
-      if (!id || voices[id]) continue;
-      const choice = c.voice_id && !used.has(c.voice_id) ? c.voice_id : (DEFAULT_VOICE[c.gender] || DEFAULT_VOICE.male).find((v) => !used.has(v)) || c.voice_id || 'adrian';
-      voices[id] = choice; used.add(choice);
+      if (!id) continue;
+      const pick = chosen(c.name) || assets[id]?.voice_id || voices[id]
+        || (c.voice_id && !used.has(c.voice_id) ? c.voice_id : (DEFAULT_VOICE[c.gender] || DEFAULT_VOICE.male).find((v) => !used.has(v)) || c.voice_id || 'adrian');
+      voices[id] = pick; used.add(pick);
+      // The template remembers its voice, so the character sounds the same in every video and episode.
+      if (assets[id] && assets[id].voice_id !== pick && (chosen(c.name) || !assets[id].voice_id)) {
+        await supabase.from('video_assets').update({ voice_id: pick, updated_at: now() }).eq('id', id).eq('user_id', p.user_id);
+      }
     }
     const pronounce = [...(bible.pronunciations || []), ...b.characters.filter((c) => c.say_as).map((c) => ({ name: c.name, say: c.say_as }))]
       .filter((x, i, all) => all.findIndex((y) => sameName(y.name, x.name)) === i).slice(0, 60);
@@ -323,7 +331,7 @@ const STAGE_RUN = {
     if (!todo.length) return true;
     const batch = todo.slice(0, 6);
     await charged(p, 'voiceLine', { units: batch.length, key: `vo:${batch[0].shot.number}:${batch[0].i}` }, async () => {
-      const results = await Promise.all(batch.map(({ l }) => speakLine(l.say || l.text, { voiceId: l.voice_id, tone: l.tone || 'natural' })));
+      const results = await Promise.all(batch.map(({ l }) => speakLine(l.say || l.text, { voiceId: l.voice_id, tone: l.tone || 'natural', userId: p.user_id })));
       const byShot = new Map();
       batch.forEach(({ shot, i }, k) => {
         const lines = byShot.get(shot.id) || [...shot.lines];

@@ -24,7 +24,8 @@ import { callRunwareTasks } from '../utils/runwareClient.js';
 import { v2 as cloudinary } from 'cloudinary';
 import { AI_MODELS } from '../config/aiModels.js';
 import { assembleShot } from '../config/videoCast.js';
-import { lightText, VOICES, MUSIC_THEMES, LOOKS, ASPECTS } from '../config/soundStudio.js';
+import { lightText, VOICES, MUSIC_THEMES, LOOKS, ASPECTS, validVoiceId } from '../config/soundStudio.js';
+import { customVoiceMap, publicCustomVoice } from '../utils/customVoices.js';
 import { GENRE_PACKS, FORMATS, VISUAL_MODES, DRAMA_MODES, ART_STYLES, LIMITS, estimateCredits, EPISODE_MODEL } from '../config/episodeEngine.js';
 import { STAGES, advanceEpisode, kickEpisodes } from '../utils/episodePipeline.js';
 import fs from 'fs';
@@ -79,9 +80,10 @@ function episodeView(p, shots = []) {
 // ── Setup ───────────────────────────────────────────────────────────────────
 router.get('/options', authenticateToken, async (req, res) => {
   const status = await creditStatus(req.user.id).catch(() => null);
+  const customs = await customVoiceMap(req.user.id);
   const [{ data: series }, { data: assets }] = await Promise.all([
     supabase.from('video_series').select('id, title, genre, settings, episode_count, updated_at').eq('user_id', req.user.id).order('updated_at', { ascending: false }).limit(50),
-    supabase.from('video_assets').select('id, kind, name, description, refs').eq('user_id', req.user.id).order('updated_at', { ascending: false }).limit(200),
+    supabase.from('video_assets').select('*').eq('user_id', req.user.id).order('updated_at', { ascending: false }).limit(200),
   ]);
   const unit = (a, o = {}) => creditsFor(a, { premium: true, ...o });
   res.json({ success: true, data: {
@@ -92,8 +94,9 @@ router.get('/options', authenticateToken, async (req, res) => {
     art_styles: Object.entries(ART_STYLES).map(([id, a]) => ({ id, label: a.label })),
     looks: Object.entries(LOOKS).map(([id, l]) => ({ id, label: l.label })), aspects: Object.keys(ASPECTS),
     voices: VOICES.map((v) => ({ id: v.id, name: v.name, about: v.about, accent: v.accent, gender: v.gender })),
+    custom_voices: Object.values(customs).map(publicCustomVoice),
     music: MUSIC_THEMES.map((t) => ({ id: t.id, label: t.label, url: LIBRARY.music.find((m) => m.id === t.id)?.url || null })),
-    series: series || [], cast: (assets || []).map((a) => ({ id: a.id, kind: a.kind, name: a.name, picture: a.refs?.[0]?.url || null })),
+    series: series || [], cast: (assets || []).map((a) => ({ id: a.id, kind: a.kind, name: a.name, picture: a.refs?.[0]?.url || null, voice_id: a.voice_id || null })),
     limits: { script_chars: LIMITS.scriptChars },
     prices: { image: unit('image'), keyframe: unit('keyframe'), clip: unit('video', { reference: true }), still_motion: unit('stillMotion'), voice_line: unit('voiceLine'), breakdown: unit('episodeBreakdown'), breakdown_long: unit('episodeBreakdownLong'), render: unit('episodeRender'), ledger: unit('episodeLedger'), scan: unit('writing') },
   } });
@@ -171,7 +174,7 @@ router.post('/', authenticateToken, requirePlan, async (req, res) => {
   } else if (String(b.series_title || '').trim()) {
     const { data, error } = await supabase.from('video_series').insert({
       user_id: req.user.id, title: String(b.series_title).trim().slice(0, 120), genre,
-      settings: { art_style: ART_STYLES[b.art_style] ? b.art_style : 'cinematic', look: LOOKS[b.look] ? b.look : pack.look, aspect: ASPECTS[b.aspect] ? b.aspect : 'portrait', narrator_voice: VOICES.some((v) => v.id === b.narrator_voice) ? b.narrator_voice : null, music_theme: b.music_theme || null },
+      settings: { art_style: ART_STYLES[b.art_style] ? b.art_style : 'cinematic', look: LOOKS[b.look] ? b.look : pack.look, aspect: ASPECTS[b.aspect] ? b.aspect : 'portrait', narrator_voice: validVoiceId(b.narrator_voice) ? b.narrator_voice : null, music_theme: b.music_theme || null },
     }).select().single();
     if (error) return saveFail(res, error, 'Could not create the series');
     series = data;
@@ -181,9 +184,11 @@ router.post('/', authenticateToken, requirePlan, async (req, res) => {
     genre, seconds: format.seconds, format: format.id, visual_mode: visual,
     drama_mode: DRAMA_MODES[b.drama_mode] ? b.drama_mode : pack.drama,
     art_style: ss.art_style || (ART_STYLES[b.art_style] ? b.art_style : 'cinematic'),
-    narrator_voice: ss.narrator_voice || (VOICES.some((v) => v.id === b.narrator_voice) ? b.narrator_voice : 'adrian'),
+    narrator_voice: ss.narrator_voice || (validVoiceId(b.narrator_voice) ? b.narrator_voice : 'adrian'),
     review_storyboard: b.review_storyboard !== false, captions: b.captions !== false, cliffhanger: b.cliffhanger !== false, title_card: b.title_card !== false,
     cast_map: castMap,
+    // A voice per script name (built-in or the user's custom voice): "ELLIE" → "custom:…".
+    voice_map: Object.fromEntries(Object.entries(b.voice_map || {}).filter(([n, id]) => String(n).trim() && validVoiceId(id)).slice(0, 15).map(([n, id]) => [String(n).trim().slice(0, 60), id])),
   };
   const aspect = ss.aspect || (ASPECTS[b.aspect] ? b.aspect : 'portrait');
   const look = ss.look || (LOOKS[b.look] ? b.look : pack.look);

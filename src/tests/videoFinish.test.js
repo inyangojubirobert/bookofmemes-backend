@@ -84,3 +84,19 @@ assert.strictEqual(creditsFor('voiceLine', { premium: true, units: 4 }), 4);
 for (const a of ['sfxPerSecond', 'voiceLine']) assert.ok(ACTION_COST_USD[a].premium / ACTION_COSTS[a].premium <= CREDIT_COST_CEILING_USD);
 
 console.log('videoFinish: all 9 groups passed');
+
+// 10. Custom voices and the naming rule (086).
+const { parseSpeakers, validVoiceId, isCustomVoice } = await import('../../config/soundStudio.js');
+const cv = 'custom:0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d';
+assert.ok(validVoiceId('adaeze') && validVoiceId(cv) && !validVoiceId('custom:nope') && !validVoiceId('elevenlabs'));
+assert.ok(isCustomVoice(cv));
+const ct = voiceTask('Hello there.', { tone: 'whisper', custom: { id: '0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d', name: 'Grandpa Joe', sample_url: 'https://res.cloudinary.com/x/video/upload/v.mp3', transcript: 'The rain had stopped.' } });
+assert.strictEqual(ct.speech.voice, undefined, 'a custom voice sends no preset voice');
+assert.deepStrictEqual(ct.inputs.referenceVoices, [{ audio: 'https://res.cloudinary.com/x/video/upload/v.mp3', text: 'The rain had stopped.' }]);
+assert.strictEqual(ct.voice.id, cv);
+assert.deepStrictEqual(parseSpeakers('ELLIE: Not today. She runs. MR. OKAFOR: Rent!', ['Ellie', 'Mr. Okafor']),
+  [{ speaker: 'Ellie', text: 'Not today. She runs.' }, { speaker: 'Mr. Okafor', text: 'Rent!' }]);
+assert.deepStrictEqual(parseSpeakers('Note: plain words.', ['Ellie']), [{ speaker: null, text: 'Note: plain words.' }]);
+assert.deepStrictEqual(cleanVoice({ voice_id: cv, cast: { Ellie: cv, Narrator: 'adrian', Bad: 'nope' } }), { voice_id: cv, tone: 'natural', speed: 1, cast: { Ellie: cv } });
+assert.strictEqual(cleanVoice({ tone: 'sad' }, { voice_id: 'laura', cast: { Ellie: 'sarah' } }).cast.Ellie, 'sarah', 'the cast is kept when not changed');
+console.log('videoFinish: custom voices + naming rule passed');

@@ -33,7 +33,10 @@ import {
   VOICES, TONES, SPEEDS, MAX_LINE_CHARS, voiceById, cleanVoice, MUSIC_THEMES, MOODS, TEMPOS, MUSIC_LEVELS, musicPrompt,
   SFX_CATEGORIES, SFX_LEVELS, SFX_MAX_SECONDS, SFX_PER_SHOT, cleanSfx, LOOKS, LOOK_STRENGTHS, GRADE_KEYS, ASPECTS, ZOOMS, ANCHORS,
   LIGHTING, LIGHT_COLOURS, cleanLight, lightText, cleanEdit, cleanFinish, VOICE_MODEL,
+  validVoiceId, parseSpeakers, CUSTOM_SAMPLE_SCRIPT,
 } from '../config/soundStudio.js';
+import { customVoiceMap, voiceName, publicCustomVoice } from '../utils/customVoices.js';
+import { listMyContent, contentText, CONTENT_KINDS } from '../utils/myContent.js';
 import fs from 'fs';
 import { planVideo, shotBudget, shotPrompt, referenceFrames, LENGTHS, LIMITS, VIDEO_PLAN_MODEL, PROMPT_VERSION, VideoError, clipModel } from '../config/videoEngine.js';
 import { assembleShot, cleanAsset, cleanSlots, continuityNotes, hasSlots, readiness, SLOTS, POSITIONS, POSES, EXPRESSIONS, LIMITS as CAST_LIMITS } from '../config/videoCast.js';
@@ -103,20 +106,52 @@ const lineVoice = (project, shot) => {
   return { ...base, voice_id: shot.voice_id || base.voice_id, tone: shot.voice_tone || base.tone };
 };
 
+/**
+ * Who says what (naming convention "NAME: line"). The speakers are the video's characters
+ * (look card), the names given voices in project.voice.cast, and the user's Cast characters
+ * (whose template voice, video_assets.voice_id, is used when the video sets none).
+ */
+async function speakingContext(project) {
+  const { data } = await supabase.from('video_assets').select('name, voice_id').eq('user_id', project.user_id).eq('kind', 'character').limit(200);
+  const voices = {};
+  for (const a of data || []) if (a.voice_id) voices[a.name.toLowerCase()] = a.voice_id;
+  for (const [n, id] of Object.entries(project.voice?.cast || {})) voices[n.toLowerCase()] = id;
+  const names = [...(project.look_card?.characters || []).map((c) => c.name), ...Object.keys(project.voice?.cast || {}), ...(data || []).map((a) => a.name)];
+  return { names, voices };
+}
+/** The lines a shot is recorded as: one narration line, or one line per speaker. */
+function planLines(project, shot, ctx) {
+  const base = lineVoice(project, shot);
+  const segs = parseSpeakers(shot.narration, ctx.names);
+  const dialog = segs.some((x) => x.speaker);
+  const lines = dialog
+    ? segs.map((x) => ({ speaker: x.speaker || 'NARRATOR', text: x.text, voice_id: x.speaker ? ctx.voices[x.speaker.toLowerCase()] || base.voice_id : base.voice_id, tone: base.tone }))
+    : [{ speaker: 'NARRATOR', text: String(shot.narration || '').trim(), voice_id: base.voice_id, tone: base.tone }];
+  const key = dialog ? crypto.createHash('md5').update(JSON.stringify([lines, base.speed])).digest('hex') : voiceKey(shot.narration, base);
+  return { dialog, lines, key, speed: base.speed };
+}
+
 async function view(project, shots = null) {
   const list = shots || await loadShots(project.id);
   const assets = list.some((s) => hasSlots(s.cast_slots)) ? await loadAssets(project.user_id) : {};
   const continuity = continuityNotes(list, assets);
   const previews = await Promise.all(list.map((s) => (s.clip_public_id ? editedPreview(s, project).catch(() => null) : null)));
+  const ctx = list.some((s) => String(s.narration || '').includes(':')) ? await speakingContext(project) : { names: [], voices: {} };
+  const customs = await customVoiceMap(project.user_id);
   return {
     ...project,
+    custom_voice_names: Object.fromEntries(Object.entries(customs).map(([id, v]) => [id, v.name])),
     shots: list.map((s, i) => {
       const a = promptFor(project, s, assets);
       const v = lineVoice(project, s);
-      const voice = s.narration?.trim() ? {
-        voice_id: v.voice_id, voice_name: voiceById(v.voice_id).name, tone: v.tone,
-        recorded: !!s.voice_url, stale: !!s.voice_url && s.voice_key !== voiceKey(s.narration, v),
-        too_long: !!s.voice_seconds && Number(s.voice_seconds) - Number(s.voice_lead_in || 0) > Number(s.duration_seconds || 5) + 0.5,
+      const planned = s.narration?.trim() ? planLines(project, s, ctx) : null;
+      const recordedLines = (s.lines || []).filter((l) => l.url).length;
+      const recorded = !!s.voice_url || (planned?.dialog && recordedLines > 0);
+      const voice = planned ? {
+        voice_id: v.voice_id, voice_name: voiceName(v.voice_id, customs), tone: v.tone,
+        speakers: planned.dialog ? planned.lines.map((l) => ({ speaker: l.speaker, voice_name: voiceName(l.voice_id, customs) })) : null,
+        recorded, stale: recorded && s.voice_key !== planned.key,
+        too_long: !planned.dialog && !!s.voice_seconds && Number(s.voice_seconds) - Number(s.voice_lead_in || 0) > Number(s.duration_seconds || 5) + 0.5,
       } : null;
       return { ...s, prompt: a.prompt, references: a.labels, continuity: hasSlots(s.cast_slots) ? continuity[s.id] || [] : [], preview: previews[i], line: voice };
     }),
@@ -189,12 +224,27 @@ router.get('/stories', authenticateToken, async (req, res) => {
   res.json({ success: true, data: (data || []).map((p) => ({ id: p.id, title: p.plan?.title || p.title || 'Untitled', kind: p.kind || 'story' })) });
 });
 
+// Everything the user wrote that can become a video: Studio projects, posted stories,
+// books, podcast transcripts (utils/myContent.js). Shared with the Auto Episode Engine.
+router.get('/my-content', authenticateToken, async (req, res) => {
+  try { res.json({ success: true, data: await listMyContent(req.user.id, req.query.q) }); }
+  catch (err) { console.error('[video] my content:', err.message); fail(res, 500, 'Could not load your content'); }
+});
+router.get('/my-content/:kind/:cid', authenticateToken, async (req, res) => {
+  if (!CONTENT_KINDS[req.params.kind] || !UUID.test(req.params.cid)) return fail(res, 404, 'Not found');
+  const part = req.query.part ? Number(req.query.part) : null;
+  const c = await contentText(req.user.id, req.params.kind, req.params.cid, part).catch(() => null);
+  if (!c) return fail(res, 404, 'Not found');
+  res.json({ success: true, data: c });
+});
+
 // ── 1. Plan ─────────────────────────────────────────────────────────────────
 router.post('/projects', authenticateToken, requireVideoPlan, async (req, res) => {
   const idea = String(req.body?.idea || '').trim();
   const storyId = UUID.test(String(req.body?.story_project_id || '')) ? req.body.story_project_id : null;
   const refUrl = HTTPS.test(String(req.body?.reference_video_url || '')) ? req.body.reference_video_url : null;
-  if (!storyId && idea.length < 10) return fail(res, 400, 'Describe your video (a sentence or two), or pick one of your stories.');
+  const content = req.body?.content && CONTENT_KINDS[req.body.content.kind] && UUID.test(String(req.body.content.id || '')) ? req.body.content : null;
+  if (!storyId && !content && idea.length < 10) return fail(res, 400, 'Describe your video (a sentence or two), or pick one of your stories.');
   if (idea.length > LIMITS.ideaChars) return fail(res, 400, `Keep it under ${LIMITS.ideaChars.toLocaleString()} characters.`);
   const b = shotBudget(req.body?.target_seconds);
 
@@ -209,6 +259,11 @@ router.post('/projects', authenticateToken, requireVideoPlan, async (req, res) =
       (m.summaries || []).length && `WHAT HAPPENS:\n${m.summaries.map((s) => `${s.number}. ${s.title}: ${s.summary}`).join('\n')}`,
     ].filter(Boolean).join('\n');
   }
+  if (content) {
+    const c = await contentText(req.user.id, content.kind, content.id, content.part || null).catch(() => null);
+    if (!c?.text) return fail(res, 404, 'That content has no text to turn into a video.');
+    storyContext = `TITLE: ${c.title}\n${c.text.slice(0, 6000)}`;
+  }
   let refVideo = null;
   if (refUrl) {
     try { refVideo = `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/video/upload/${await ensureOnCloudinary(refUrl)}.mp4`; }
@@ -218,10 +273,13 @@ router.post('/projects', authenticateToken, requireVideoPlan, async (req, res) =
   // Sound & light plan (on unless the app says no): music theme 'auto' | 'none' | a theme id; narrator voice.
   const wantSound = req.body?.sound_plan !== false;
   const musicChoice = String(req.body?.music_theme || 'auto');
+  // Voices by name chosen while planning (naming convention: "NAME: line" in a shot is said in NAME's voice).
+  const voiceCast = cleanVoice({ cast: req.body?.voice_cast || {} }).cast || {};
   const sound = wantSound ? {
     musicTheme: musicChoice === 'none' || musicChoice === 'auto' || MUSIC_THEMES.some((t) => t.id === musicChoice) ? musicChoice : 'auto',
-    voiceId: VOICES.some((v) => v.id === req.body?.voice_id) ? req.body.voice_id : null,
-  } : null;
+    voiceId: validVoiceId(req.body?.voice_id) ? req.body.voice_id : null,
+    speakers: Object.keys(voiceCast),
+  } : (Object.keys(voiceCast).length ? { musicTheme: 'none', voiceId: null, speakers: Object.keys(voiceCast), voiceOnly: true } : null);
 
   return runCharged(req, res, { kind: 'plan', action: frames.length ? 'videoPlanWithReference' : 'videoPlan' }, async () => {
     const r = await planVideo({ idea: idea || 'Turn this story into a video.', storyContext, targetSeconds: b.targetSeconds, frames, sound });
@@ -231,10 +289,10 @@ router.post('/projects', authenticateToken, requireVideoPlan, async (req, res) =
     const theme = sp ? (sound.musicTheme === 'none' ? null : sound.musicTheme !== 'auto' ? sound.musicTheme : sp.music_theme) : null;
     const track = theme ? LIBRARY.music.find((m) => m.id === theme) : null;
     const soundFields = sp ? {
-      voice: cleanVoice({ voice_id: sound.voiceId || sp.voice_id, tone: sp.tone }),
+      voice: cleanVoice({ voice_id: sound.voiceId || sp.voice_id, tone: sp.tone, cast: voiceCast }),
       finish: { music_level: 'low' },
       ...(track ? { music_url: track.url, music_title: track.title, music_history: [{ url: track.url, title: track.title, at: now(), planned: true }] } : {}),
-    } : {};
+    } : (Object.keys(voiceCast).length ? { voice: cleanVoice({ voice_id: sound?.voiceId, cast: voiceCast }) } : {});
     const shotSound = (i) => {
       const x = sp?.shots?.[i];
       if (!x) return {};
@@ -242,7 +300,7 @@ router.post('/projects', authenticateToken, requireVideoPlan, async (req, res) =
       return { voice_tone: x.tone, light: x.light, sfx };
     };
     const { data: project, error } = await supabase.from('video_projects').insert({
-      user_id: req.user.id, title: r.plan.title, idea: idea || '(from a story)', source_kind: storyId ? 'story' : frames.length ? 'reference' : 'idea', source_id: storyId,
+      user_id: req.user.id, title: r.plan.title, idea: idea || '(from a story)', source_kind: storyId || content ? 'story' : frames.length ? 'reference' : 'idea', source_id: storyId || content?.id || null,
       target_seconds: b.targetSeconds, clip_seconds: b.clipSeconds, model: b.model, logline: r.plan.logline, look_card: r.plan.look_card, fit_note: r.plan.fit_note || null,
       reference: frames.length ? { video_url: refVideo, frames, description: r.plan.reference_style, how: 'analysed from 3 frames, not given to the video model' } : null,
       ...soundFields,
@@ -369,7 +427,7 @@ router.patch('/projects/:id/shots/:sid', authenticateToken, async (req, res) => 
   }
   if (b.edit && typeof b.edit === 'object') up.edit = cleanEdit(b.edit, shot.edit || {});
   if (b.light !== undefined) up.light = cleanLight(b.light);
-  if (b.voice_id !== undefined) up.voice_id = b.voice_id && VOICES.some((v) => v.id === b.voice_id) ? b.voice_id : null;
+  if (b.voice_id !== undefined) up.voice_id = b.voice_id && validVoiceId(b.voice_id) ? b.voice_id : null;
   if (b.voice_tone !== undefined) up.voice_tone = b.voice_tone && TONES.some((t) => t.id === b.voice_tone) ? b.voice_tone : null;
   if (b.sfx !== undefined) {
     // Each sound: from the stock library, or the user's own (made here / Gallery) on our Cloudinary.
@@ -448,6 +506,7 @@ router.get('/assets', authenticateToken, async (req, res) => {
 router.post('/assets', authenticateToken, async (req, res) => {
   const { row, error } = cleanAsset(String(req.body?.kind || ''), req.body || {});
   if (error) return fail(res, 400, error);
+  if (row.kind === 'character' && validVoiceId(req.body?.voice_id)) row.voice_id = req.body.voice_id;
   if (row.parent_id && !(await loadAssets(req.user.id))[row.parent_id]) row.parent_id = null;
   const { data, error: e } = await supabase.from('video_assets').insert({ ...row, user_id: req.user.id }).select().single();
   if (e) { console.error('[video] asset create:', e.message); return fail(res, 500, 'Could not save it'); }
@@ -460,6 +519,7 @@ router.patch('/assets/:aid', authenticateToken, async (req, res) => {
   if (!a) return fail(res, 404, 'Not found');
   const { row, error } = cleanAsset(a.kind, req.body || {}, a);
   if (error) return fail(res, 400, error);
+  if (a.kind === 'character' && req.body?.voice_id !== undefined) row.voice_id = validVoiceId(req.body.voice_id) ? req.body.voice_id : null;
   if (row.parent_id === a.id || (row.parent_id && !(await loadAssets(req.user.id))[row.parent_id])) row.parent_id = null;
   const { data, error: e } = await supabase.from('video_assets').update({ ...row, updated_at: now() }).eq('id', a.id).select().single();
   if (e) return fail(res, 500, 'Could not save it');
@@ -544,12 +604,84 @@ router.post('/projects/:id/shots/:sid/version', authenticateToken, async (req, r
   res.json({ success: true, data: await view(p) });
 });
 
+// ── Custom voices: a user's own voice as a template (migration 086) ─────────
+// Recorded on the phone (reading CUSTOM_SAMPLE_SCRIPT) or uploaded with its words typed.
+// Used by id "custom:<uuid>" anywhere a built-in voice is: narrator, a shot, a character.
+const PREVIEW_LINE = 'Hello. This is my voice in Bascardo. Every story starts somewhere, and this one starts with me.';
+const needs086 = (err) => /custom_voices|PGRST205/i.test(err?.message || '');
+
+router.get('/voices', authenticateToken, async (req, res) => {
+  const { data, error } = await supabase.from('custom_voices').select('*').eq('user_id', req.user.id).order('updated_at', { ascending: false }).limit(100);
+  if (error) return needs086(error) ? fail(res, 503, 'Custom voices are not switched on yet (migration 086).', { code: 'needs_migration' }) : fail(res, 500, 'Could not load your voices');
+  res.json({ success: true, data: { voices: (data || []).map(publicCustomVoice), sample_script: CUSTOM_SAMPLE_SCRIPT } });
+});
+
+// { name, description?, gender?, sample_url, transcript, consent: true, request_id } — 1 voice line (its preview).
+router.post('/voices', authenticateToken, requireVideoPlan, async (req, res) => {
+  const b = req.body || {};
+  const name = String(b.name || '').trim().slice(0, 40);
+  const transcript = String(b.transcript || '').replace(/\s+/g, ' ').trim().slice(0, 1000);
+  if (!name) return fail(res, 400, 'Give the voice a name (e.g. "My voice" or "Grandpa Joe").');
+  if (b.consent !== true) return fail(res, 400, 'Confirm this is your own voice, or that the speaker agreed to it being used.');
+  if (!HTTPS.test(String(b.sample_url || ''))) return fail(res, 400, 'Record or upload the voice first.');
+  if (transcript.length < 5) return fail(res, 400, 'Type the words that are said in the recording.');
+  let publicId, seconds = 0;
+  try {
+    publicId = await ensureOnCloudinary(b.sample_url, 'bookofmemes/custom-voices');
+    const r = await cloudinary.api.resource(publicId, { resource_type: 'video' });
+    seconds = Number(r.duration) || 0;
+  } catch (err) { console.error('[voices] sample:', err.message); return fail(res, 400, 'Could not open that recording. Try again.'); }
+  if (seconds < 3) return fail(res, 400, 'The recording is too short: record at least 5 seconds (10-30 is best).');
+  if (seconds > 90) return fail(res, 400, 'The recording is too long: keep it under 90 seconds.');
+  const sampleUrl = `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/video/upload/${publicId}.mp3`;
+  const { data: row, error } = await supabase.from('custom_voices').insert({
+    user_id: req.user.id, name, description: String(b.description || '').trim().slice(0, 200),
+    gender: ['male', 'female', 'child'].includes(b.gender) ? b.gender : null, sample_url: sampleUrl, transcript, seconds, consent: true,
+  }).select().single();
+  if (error) {
+    if (error.code === '23505') return fail(res, 400, `You already have a voice called "${name}". Choose another name.`);
+    return needs086(error) ? fail(res, 503, 'Custom voices are not switched on yet (migration 086).', { code: 'needs_migration' }) : fail(res, 500, 'Could not save the voice');
+  }
+  return runCharged(req, res, { kind: 'custom_voice', action: 'voiceLine', log: { feature: 'voice', provider: 'runware', model: VOICE_MODEL } }, async () => {
+    let r;
+    try { r = await speakLine(PREVIEW_LINE, { voiceId: `custom:${row.id}`, userId: req.user.id, folder: 'bookofmemes/custom-voices/previews' }); }
+    catch (err) {
+      await supabase.from('custom_voices').delete().eq('id', row.id);
+      console.error('[voices] preview:', err.message);
+      throw Object.assign(new Error("That recording couldn't be turned into a voice. Record again somewhere quiet, reading the words exactly."), { status: 400 });
+    }
+    const { data: saved } = await supabase.from('custom_voices').update({ preview_url: r.url, updated_at: now() }).eq('id', row.id).select().single();
+    return { data: publicCustomVoice(saved || row), providerCost: r.cost, durationSeconds: r.seconds, outputUrl: r.url };
+  });
+});
+
+router.patch('/voices/:vid', authenticateToken, async (req, res) => {
+  if (!UUID.test(req.params.vid)) return fail(res, 404, 'Not found');
+  const up = { updated_at: now() };
+  if (typeof req.body?.name === 'string' && req.body.name.trim()) up.name = req.body.name.trim().slice(0, 40);
+  if (typeof req.body?.description === 'string') up.description = req.body.description.trim().slice(0, 200);
+  if (req.body?.gender !== undefined) up.gender = ['male', 'female', 'child'].includes(req.body.gender) ? req.body.gender : null;
+  const { data, error } = await supabase.from('custom_voices').update(up).eq('id', req.params.vid).eq('user_id', req.user.id).select().single();
+  if (error) return fail(res, error.code === '23505' ? 400 : 404, error.code === '23505' ? 'You already have a voice with that name.' : 'Not found');
+  res.json({ success: true, data: publicCustomVoice(data) });
+});
+
+router.delete('/voices/:vid', authenticateToken, async (req, res) => {
+  if (!UUID.test(req.params.vid)) return fail(res, 404, 'Not found');
+  await supabase.from('custom_voices').delete().eq('id', req.params.vid).eq('user_id', req.user.id);
+  // Characters that used it fall back to choosing a voice again.
+  await supabase.from('video_assets').update({ voice_id: null }).eq('user_id', req.user.id).eq('voice_id', `custom:${req.params.vid}`);
+  res.json({ success: true });
+});
+
 // ── 3. Finishing: voices, sounds, music, light & colour (migration 083) ─────
 // Everything the app needs to choose from, with prices. Stock items are free.
 router.get('/finishing', authenticateToken, async (req, res) => {
   const status = await creditStatus(req.user.id).catch(() => null);
   const premium = !!status?.plan?.premiumModels;
+  const customs = await customVoiceMap(req.user.id);
   res.json({ success: true, data: {
+    custom_voices: Object.values(customs).map(publicCustomVoice), custom_sample_script: CUSTOM_SAMPLE_SCRIPT,
     voices: VOICES.map((v) => ({ id: v.id, name: v.name, gender: v.gender, age: v.age, accent: v.accent, group: v.group, about: v.about, sample_url: LIBRARY.voices?.[v.id] || null })),
     tones: TONES.map(({ id, label }) => ({ id, label })), speeds: SPEEDS, max_line_chars: MAX_LINE_CHARS,
     music: { themes: MUSIC_THEMES.map(({ id, label }) => ({ id, label })), moods: MOODS, tempos: Object.keys(TEMPOS), levels: Object.keys(MUSIC_LEVELS), library: LIBRARY.music },
@@ -570,7 +702,7 @@ router.post('/voice-preview', authenticateToken, requireVideoPlan, async (req, r
   if (text.length < 3) return fail(res, 400, 'Type a line to hear.');
   const v = cleanVoice(req.body || {});
   return runCharged(req, res, { kind: 'voice_preview', action: 'voiceLine', log: { feature: 'voice', provider: 'runware', model: VOICE_MODEL } }, async () => {
-    const r = await speakLine(text, { voiceId: v.voice_id, tone: v.tone, speed: v.speed, folder: 'bookofmemes/video-studio/voice-previews' });
+    const r = await speakLine(text, { voiceId: v.voice_id, tone: v.tone, speed: v.speed, userId: req.user.id, folder: 'bookofmemes/video-studio/voice-previews' });
     return { data: { url: r.url, seconds: r.seconds, voice: r.voice }, providerCost: r.cost, durationSeconds: r.seconds, outputUrl: r.url };
   });
 });
@@ -581,23 +713,29 @@ router.post('/projects/:id/voice-lines', authenticateToken, requireVideoPlan, as
   const p = await loadProject(req.user.id, req.params.id);
   if (!p) return fail(res, 404, 'Video not found');
   const only = Array.isArray(req.body?.shot_ids) ? new Set(req.body.shot_ids.map(String)) : null;
+  const ctx = await speakingContext(p);
   const shots = (await loadShots(p.id)).filter((s) => s.included && s.narration?.trim())
-    .filter((s) => (only ? only.has(s.id) : !s.voice_url || s.voice_key !== voiceKey(s.narration, lineVoice(p, s))));
+    .map((s) => ({ s, plan: planLines(p, s, ctx) }))
+    .filter(({ s, plan }) => (only ? only.has(s.id) : s.voice_key !== plan.key || (!s.voice_url && !(s.lines || []).some((l) => l.url))));
   if (!shots.length) return fail(res, 400, only ? 'Those shots have no narration.' : 'Every line is already recorded. Change a line, voice or tone to record it again.');
-  if (shots.some((s) => s.narration.trim().length > MAX_LINE_CHARS)) return fail(res, 400, `Keep each shot's line under ${MAX_LINE_CHARS} characters.`);
-  return runCharged(req, res, { kind: 'voice_lines', action: 'voiceLine', projectId: p.id, costOpts: { units: shots.length }, log: { feature: 'voice', provider: 'runware', model: VOICE_MODEL } }, async () => {
+  if (shots.some(({ s }) => s.narration.trim().length > MAX_LINE_CHARS)) return fail(res, 400, `Keep each shot's line under ${MAX_LINE_CHARS} characters.`);
+  const units = shots.reduce((n, x) => n + x.plan.lines.length, 0); // one credit per spoken line (per speaker)
+  return runCharged(req, res, { kind: 'voice_lines', action: 'voiceLine', projectId: p.id, costOpts: { units }, log: { feature: 'voice', provider: 'runware', model: VOICE_MODEL } }, async () => {
     let cost = 0, seconds = 0;
     for (let i = 0; i < shots.length; i += 3) {
-      await Promise.all(shots.slice(i, i + 3).map(async (s) => {
-        const v = lineVoice(p, s);
-        const r = await speakLine(s.narration, { voiceId: v.voice_id, tone: v.tone, speed: v.speed });
-        cost += Number(r.cost) || 0; seconds += r.seconds;
-        const { error } = await supabase.from('video_shots').update({ voice_url: r.url, voice_public_id: r.public_id, voice_seconds: r.seconds, voice_lead_in: r.lead_in, voice_key: voiceKey(s.narration, v), updated_at: now() }).eq('id', s.id);
-        if (error) throw Object.assign(new Error(needs083(error) ? 'Video finishing is not switched on yet (migration 083).' : 'Could not save the line'), { status: 400 });
-        saveToGallery({ userId: req.user.id, kind: 'audio', url: r.url, feature: 'narration', prompt: s.narration, model: VOICE_MODEL, durationSeconds: r.seconds, projectKind: 'video', projectId: p.id, role: 'voice_line', provider: 'runware', providerCost: r.cost });
+      await Promise.all(shots.slice(i, i + 3).map(async ({ s, plan }) => {
+        const said = await Promise.all(plan.lines.map((l) => speakLine(l.text, { voiceId: l.voice_id, tone: l.tone, speed: plan.speed, userId: req.user.id })));
+        said.forEach((r) => { cost += Number(r.cost) || 0; seconds += r.seconds; });
+        const update = plan.dialog
+          ? { lines: plan.lines.map((l, k) => ({ ...l, url: said[k].url, public_id: said[k].public_id, seconds: said[k].seconds, lead_in: said[k].lead_in })), voice_url: null, voice_public_id: null, voice_seconds: said.reduce((n, r) => n + r.seconds, 0), voice_lead_in: 0 }
+          : { lines: [], voice_url: said[0].url, voice_public_id: said[0].public_id, voice_seconds: said[0].seconds, voice_lead_in: said[0].lead_in };
+        let { error } = await supabase.from('video_shots').update({ ...update, voice_key: plan.key, updated_at: now() }).eq('id', s.id);
+        if (error && /lines/.test(error.message) && !plan.dialog) ({ error } = await supabase.from('video_shots').update({ voice_url: update.voice_url, voice_public_id: update.voice_public_id, voice_seconds: update.voice_seconds, voice_lead_in: update.voice_lead_in, voice_key: plan.key, updated_at: now() }).eq('id', s.id));
+        if (error) throw Object.assign(new Error(needs083(error) ? 'Video finishing is not switched on yet (migrations 083/084).' : 'Could not save the line'), { status: 400 });
+        said.forEach((r, k) => saveToGallery({ userId: req.user.id, kind: 'audio', url: r.url, feature: 'narration', prompt: plan.lines[k].text, model: VOICE_MODEL, durationSeconds: r.seconds, projectKind: 'video', projectId: p.id, role: 'voice_line', provider: 'runware', providerCost: r.cost }));
       }));
     }
-    return { data: { project: await view(p), lines: shots.length }, providerCost: cost || null, durationSeconds: seconds };
+    return { data: { project: await view(p), lines: units }, providerCost: cost || null, durationSeconds: seconds };
   });
 });
 
