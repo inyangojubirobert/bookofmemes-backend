@@ -174,7 +174,7 @@ router.post('/', authenticateToken, requirePlan, async (req, res) => {
   } else if (String(b.series_title || '').trim()) {
     const { data, error } = await supabase.from('video_series').insert({
       user_id: req.user.id, title: String(b.series_title).trim().slice(0, 120), genre,
-      settings: { art_style: ART_STYLES[b.art_style] ? b.art_style : 'cinematic', look: LOOKS[b.look] ? b.look : pack.look, aspect: ASPECTS[b.aspect] ? b.aspect : 'portrait', narrator_voice: validVoiceId(b.narrator_voice) ? b.narrator_voice : null, music_theme: b.music_theme || null },
+      settings: { art_style: ART_STYLES[b.art_style] ? b.art_style : 'cinematic', look: LOOKS[b.look] ? b.look : pack.look, aspect: ASPECTS[b.aspect] ? b.aspect : 'portrait', narrator_voice: validVoiceId(b.narrator_voice) ? b.narrator_voice : null, music_theme: MUSIC_THEMES.some((t) => t.id === b.music_theme) ? b.music_theme : null }, // only a real theme ('auto' and 'none' are per episode)
     }).select().single();
     if (error) return saveFail(res, error, 'Could not create the series');
     series = data;
@@ -194,8 +194,9 @@ router.post('/', authenticateToken, requirePlan, async (req, res) => {
   const look = ss.look || (LOOKS[b.look] ? b.look : pack.look);
   // 'auto' (default): Bascardo picks the theme from the script after reading it (utils/episodePipeline.js).
   const musicAuto = !b.music_theme || b.music_theme === 'auto';
-  settings.music_auto = musicAuto && !ss.music_theme;
-  const themeId = b.music_theme === 'none' ? null : (MUSIC_THEMES.some((t) => t.id === b.music_theme) ? b.music_theme : ss.music_theme || (musicAuto ? null : pack.music));
+  const seriesTheme = MUSIC_THEMES.some((t) => t.id === ss.music_theme) ? ss.music_theme : null; // older series stored 'auto'
+  settings.music_auto = musicAuto && !seriesTheme;
+  const themeId = b.music_theme === 'none' ? null : (MUSIC_THEMES.some((t) => t.id === b.music_theme) ? b.music_theme : seriesTheme || (musicAuto ? null : pack.music));
   const track = themeId ? LIBRARY.music.find((m) => m.id === themeId) : null;
   const estimate = estimateCredits({ seconds: format.seconds, visual_mode: visual, newCast: 3 }, creditsFor);
   const episodeNumber = series ? (series.episode_count || 0) + 1 : null;

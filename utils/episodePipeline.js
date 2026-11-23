@@ -422,7 +422,7 @@ const STAGE_RUN = {
       if (base && b.cliffhanger && p.settings?.cliffhanger !== false) parts.push(await makeCard({ baseImageId: base, aspect: p.aspect, seconds: 3, lines: [b.cliffhanger, 'Next episode…'] }));
       const music = p.music_url ? LIBRARY.music.find((m) => m.url === p.music_url) : null;
       const musicId = music ? music.url.match(/upload\/(?:v\d+\/)?(.+)\.[a-z0-9]+$/i)?.[1] : null;
-      const r = await joinParts({ parts, musicPublicId: musicId, musicLevel: p.finish?.music_level || 'low' });
+      const r = await joinParts({ parts, musicPublicId: musicId, musicLevel: p.finish?.music_level || 'low', aspect: p.aspect });
       await save(p, { render_url: r.url, render_seconds: r.seconds, status: 'rendered' });
       saveToGallery({ userId: p.user_id, kind: 'video', url: r.url, feature: 'video', prompt: p.title, model: 'episode', durationSeconds: r.seconds, projectKind: 'video', projectId: p.id, role: 'render', provider: 'cloudinary' });
       p.pipeline.thumbnail = shots[0]?.still_url || null;

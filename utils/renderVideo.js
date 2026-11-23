@@ -173,11 +173,13 @@ export async function renderFilm({ shots, project, musicPublicId = null, voiceov
  * music under all of it. Parts are already edited, so this is a plain splice; it keeps
  * each Cloudinary URL short (a whole episode in one URL would be too long).
  */
-export async function joinParts({ parts, musicPublicId = null, musicLevel = 'low', folder = 'bookofmemes/video-studio/episodes' }) {
+export async function joinParts({ parts, musicPublicId = null, musicLevel = 'low', aspect = 'landscape', folder = 'bookofmemes/video-studio/episodes' }) {
   if (!parts.length) throw new Error('Nothing to join');
   const total = parts.reduce((n, p) => n + (Number(p.seconds) || 0), 0);
-  const t = [];
-  for (const p of parts.slice(1)) { t.push({ overlay: `video:${layerId(p.publicId)}`, flags: 'splice' }); t.push({ flags: 'layer_apply' }); }
+  // Cloudinary only splices videos of the same size: every part is fitted to the video's shape.
+  const [width, height] = ASPECTS[aspect] || ASPECTS.landscape;
+  const t = [{ width, height, crop: 'fill' }];
+  for (const p of parts.slice(1)) { t.push({ overlay: `video:${layerId(p.publicId)}`, flags: 'splice', width, height, crop: 'fill' }); t.push({ flags: 'layer_apply' }); }
   if (musicPublicId) {
     t.push(...audioLayer(musicPublicId, { volume: MUSIC_LEVELS[musicLevel] ?? MUSIC_LEVELS.low, length: total, fadeOut: total > 6 ? 2.5 : 0 }));
     t.push({ flags: 'layer_apply' });
@@ -199,6 +201,7 @@ export async function makeCard({ baseImageId, lines, seconds = 3, aspect = 'land
     t.push({ flags: 'layer_apply', gravity: 'center', y: Math.round((i - (shown.length - 1) / 2) * height * 0.12) });
   });
   t.push({ effect: `zoompan:du_${seconds};from_(g_center;zoom_1);to_(g_center;zoom_1.06)` });
+  t.push({ width, height, crop: 'fill' }); // zoompan shrinks the frame (measured 640x1138 from 720x1280): back to the video's size
   const url = cloudinary.url(baseImageId, { resource_type: 'image', format: 'mp4', transformation: t });
   await fetchBuilt(url);
   const up = await cloudinary.uploader.upload(url, { resource_type: 'video', folder });
