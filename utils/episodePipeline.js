@@ -52,6 +52,11 @@ const MAX_KEYFRAME_TRIES = 2; // the first drawing + one automatic redraw if the
 const MOVE_BY_KIND = { establishing: 'pull', dialogue: 'push', reaction: 'close', action: 'pan', insert: 'close', transition: 'tilt' };
 
 class Pause extends Error { constructor(code, message) { super(message); this.code = code; } }
+class Refused extends Error { constructor(shot) { super('refused by the image safety filter'); this.shot = shot; } }
+// Runware passes on the image model's moderation refusal as a 400.
+const isRefusal = (err) => /content moderation|flagged|invalid content|nsfw|safety|not allowed/i.test(String(err?.message || ''));
+/** The same templates with only physical looks: no story description, which can read as unsafe out of context. */
+const looksOnly = (assets) => Object.fromEntries(Object.entries(assets).map(([id, a]) => [id, a.kind === 'character' ? { ...a, description: '' } : a]));
 
 // ── Small helpers ───────────────────────────────────────────────────────────
 async function load(id) {
@@ -109,7 +114,15 @@ async function draw({ prompt, references = [], size, folder }) {
     positivePrompt: prompt.slice(0, 3000), ...(references.length ? { inputs: { referenceImages: references.slice(0, 9) } } : {}),
   };
   const { data } = await callRunwareTasks([task]);
-  const r = data?.[0];
+  let r = data?.[0];
+  // Under load Runware can answer before the picture is ready: collect it by its task id.
+  for (let i = 0; !r?.imageURL && i < 20; i++) {
+    await new Promise((x) => setTimeout(x, 4000));
+    const { data: polled } = await callRunwareTasks([{ taskType: 'getResponse', taskUUID: task.taskUUID }]);
+    const got = (polled || []).find((x) => x.imageURL) || polled?.[0];
+    if (got?.status === 'error') throw new Error(got.errorMessage || 'The picture failed');
+    if (got?.imageURL) r = got;
+  }
   if (!r?.imageURL) throw new Error('No picture came back');
   const kept = await cloudinary.uploader.upload(r.imageURL, { folder, resource_type: 'image' });
   return { url: kept.secure_url, publicId: kept.public_id, cost: r.cost ?? null, model };
@@ -259,9 +272,21 @@ const STAGE_RUN = {
     progress(p, shots.length - todo.length, shots.length, todo.length ? `Drawing shot ${todo[0].number} of ${shots.length}…` : 'Keyframes ready');
     if (!todo.length) return true;
     const [width, height] = IMAGE_SIZE[p.aspect] || IMAGE_SIZE.landscape;
-    await Promise.all(todo.slice(0, 3).map((shot) => ({ shot, a: assembleShot(p, shot, assets, { maxChars: 2800 }) })).map(({ shot, a }) => charged(p, 'keyframe', { key: `kf:${shot.number}`, opts: { refs: a.references.length } }, async () => {
-      const prompt = `A single film frame from an episode. ${lightText(shot.light)}\n${a.prompt}`;
-      const pic = await draw({ prompt, references: a.references, size: [width, height], folder: 'bookofmemes/video-studio/keyframes' });
+    const results = await Promise.allSettled(todo.slice(0, 3).map((shot) => ({ shot, a0: assembleShot(p, shot, assets, { maxChars: 2800 }) })).map(({ shot, a0 }) => charged(p, 'keyframe', { key: `kf:${shot.number}`, opts: { refs: a0.references.length } }, async () => {
+      let a = a0;
+      let prompt = `A single film frame from an episode. ${lightText(shot.light)}\n${a.prompt}`;
+      let pic;
+      try { pic = await draw({ prompt, references: a.references, size: [width, height], folder: 'bookofmemes/video-studio/keyframes' }); }
+      catch (err) {
+        if (!isRefusal(err)) throw err;
+        // The image model's safety filter refused it. Story descriptions (e.g. a teenager "who sells
+        // pieces of herself") can read as unsafe out of context: retry once with only how people look.
+        a = assembleShot(p, shot, looksOnly(assets), { maxChars: 2800 });
+        prompt = `A single film frame from an episode. ${lightText(shot.light)}\n${a.prompt}`;
+        try { pic = await draw({ prompt, references: a.references, size: [width, height], folder: 'bookofmemes/video-studio/keyframes' }); }
+        catch (err2) { if (isRefusal(err2)) throw new Refused(shot); throw err2; }
+        log(p, `Shot ${shot.number}: drawn from the characters' looks only (the image model's safety filter refused the full description).`);
+      }
       // Continuity check against each character's reference picture and the never-show list.
       const chars = (shot.cast_slots?.characters || []).map((c) => ({ name: assets[c.id]?.name, ref: assets[c.id]?.refs?.find((r) => r.slot === 'front')?.url })).filter((c) => c.name);
       const qc = await checkKeyframe({ keyframeUrl: pic.url, characters: chars, avoid: a.avoid }).catch(() => ({ ok: true, notes: 'check skipped' }));
@@ -274,6 +299,15 @@ const STAGE_RUN = {
       saveToGallery({ userId: p.user_id, kind: 'image', url: pic.url, feature: 'image', prompt, model: pic.model, projectKind: 'video', projectId: p.id, role: 'still', provider: 'runware', providerCost: pic.cost });
       if (!qc.ok) log(p, `Shot ${shot.number}: ${tries < MAX_KEYFRAME_TRIES ? 'redrawing' : 'kept, please review'} (${qc.notes})`);
     })));
+    // A refused shot is left out (not charged) and the episode carries on; anything else is retried.
+    for (const r of results) {
+      if (r.status === 'fulfilled') continue;
+      if (r.reason instanceof Refused) {
+        const shot = r.reason.shot;
+        await supabase.from('video_shots').update({ included: false, qc: { ok: false, refused: true, notes: "The image model's safety filter refused this shot. Change its description and redraw it in the Video Studio.", tries: (shot.qc?.tries || 0) + 1 }, updated_at: now() }).eq('id', shot.id);
+        log(p, `Shot ${shot.number} left out: the image model's safety filter refused it even from the characters' looks (not charged). Rewrite it and redraw it in the Video Studio to put it back.`);
+      } else throw r.reason;
+    }
     return false;
   },
 

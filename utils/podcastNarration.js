@@ -6,7 +6,22 @@
 // back plays as one file once the ID3 headers of the later parts are removed.
 import { Readable } from 'stream';
 import { v2 as cloudinary } from 'cloudinary';
+import crypto from 'crypto';
 import { synthesizeSpeech, CHARS_PER_SECOND, MAX_CHARS_PER_REQUEST } from '../routes/voiceRoutes.js';
+import { voiceTask, isCustomVoice, validVoiceId, VOICE_MODEL } from '../config/soundStudio.js';
+import { getCustomVoice } from './customVoices.js';
+import { callRunwareTasks } from './runwareClient.js';
+
+// A part in a chosen voice (built-in, or the user's own custom voice: migration 086).
+async function synthPart(text, { voiceId, custom }) {
+  const t = voiceTask(text, { voiceId, custom });
+  const { data } = await callRunwareTasks([{
+    taskType: 'audioInference', taskUUID: crypto.randomUUID(), model: VOICE_MODEL, outputFormat: 'MP3', includeCost: true,
+    speech: t.speech, settings: t.settings, ...(custom ? { inputs: t.inputs } : {}),
+  }]);
+  if (!data?.[0]?.audioURL) throw new Error('Runware returned no audio');
+  return { audioUrl: data[0].audioURL, providerCost: data[0].cost ?? null, modelUsed: VOICE_MODEL };
+}
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -68,16 +83,23 @@ const upload = (buffer, options) => new Promise((resolve, reject) => {
 });
 
 /** Narrates the script; returns { audioUrl, seconds, parts, providerCost, model }. */
-export async function narrateScript(script, { useHdModel, userId }) {
+/** voiceId (optional): a built-in voice id or the user's custom voice ("custom:<uuid>"). */
+export async function narrateScript(script, { useHdModel, userId, voiceId = null }) {
   const text = speakableText(script);
   if (text.length < 50) throw Object.assign(new Error('The script is too short to narrate.'), { status: 400 });
   if (text.length > MAX_SCRIPT_CHARS) throw Object.assign(new Error(`The script is too long to narrate (${MAX_SCRIPT_CHARS.toLocaleString()} characters at most). Shorten it and try again.`), { status: 400 });
   const pieces = splitForSpeech(text);
+  let custom = null;
+  if (isCustomVoice(voiceId)) {
+    custom = await getCustomVoice(userId, voiceId);
+    if (!custom) throw Object.assign(new Error('That custom voice was removed. Choose another voice.'), { status: 400 });
+  }
+  const chosen = validVoiceId(voiceId);
 
   // Three at a time: quick, without flooding the provider.
   const results = new Array(pieces.length);
   for (let i = 0; i < pieces.length; i += 3) {
-    const batch = await Promise.all(pieces.slice(i, i + 3).map((p) => synthesizeSpeech(p, { useHdModel })));
+    const batch = await Promise.all(pieces.slice(i, i + 3).map((p) => (chosen ? synthPart(p, { voiceId, custom }) : synthesizeSpeech(p, { useHdModel }))));
     batch.forEach((r, k) => { results[i + k] = r; });
   }
   const buffers = await Promise.all(results.map((r) => fetchBuffer(r.audioUrl)));

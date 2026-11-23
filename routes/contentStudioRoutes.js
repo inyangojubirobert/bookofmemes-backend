@@ -25,6 +25,7 @@ import { saveToGallery, isOurCloudinary } from '../utils/gallery.js';
 import { generateSong, SONG_SECONDS, MUSIC_MODEL } from '../utils/music.js';
 import { v2 as cloudinary } from 'cloudinary';
 import { narrateScript, speakableText, estimateSeconds, MAX_SCRIPT_CHARS } from '../utils/podcastNarration.js';
+import { validVoiceId } from '../config/soundStudio.js';
 import { searchText, ilikeAny } from '../utils/searchText.js';
 import {
   proposeConcepts, writeDraft, verifyPuzzle, draftToForm, publicTypes, ContentError, AGE_BANDS, PODCAST_MINUTES,
@@ -273,13 +274,36 @@ router.post('/projects/:id/narrate', authenticateToken, async (req, res) => {
     kind: 'narrate', action: 'narration', itemType: project.item_type, projectId: project.id,
     costOpts: { seconds }, log: { feature: 'voice', provider: 'runware', model: null },
   }, async (status) => {
-    const r = await narrateScript(project.draft.script, { useHdModel: status.plan.premiumModels, userId: req.user.id });
+    // A chosen voice (built-in or the user's own custom voice), else the default narrator.
+    const r = await narrateScript(project.draft.script, { useHdModel: status.plan.premiumModels, userId: req.user.id, voiceId: validVoiceId(req.body?.voice_id) ? req.body.voice_id : null });
     const media = { ...(project.media || {}), audio_url: r.audioUrl, audio_seconds: r.seconds };
     saveToGallery({ userId: req.user.id, kind: 'audio', url: r.audioUrl, feature: 'podcast_narration', prompt: project.draft.title || null, model: r.model, durationSeconds: r.seconds });
     const { data: updated, error } = await supabase.from('content_projects').update({ media, updated_at: now() }).eq('id', project.id).select().single();
     if (error) throw error;
     return { view: { project: projectView(updated), audio_url: r.audioUrl }, providerCost: r.providerCost, durationSeconds: r.seconds };
   });
+});
+
+// The user's own recording of the episode (recorded in the app or uploaded): free.
+router.post('/projects/:id/recorded-audio', authenticateToken, async (req, res) => {
+  const project = await loadProject(req.user.id, req.params.id);
+  if (!project) return fail(res, 404, 'Post not found');
+  const url = String(req.body?.url || '');
+  if (!/^https:\/\/[^\s]+$/.test(url)) return fail(res, 400, 'Record or upload the audio first.');
+  try {
+    const up = isOurCloudinary(url) ? null : await cloudinary.uploader.upload(url, { resource_type: 'video', folder: `podcast_narration/${req.user.id}` });
+    const kept = up ? up.secure_url : url;
+    let seconds = up?.duration || null;
+    if (!seconds) {
+      const id = kept.match(/\/video\/upload\/(?:[^/]+\/)*?(?:v\d+\/)(.+?)\.[a-z0-9]+$/i)?.[1];
+      if (id) seconds = (await cloudinary.api.resource(id, { resource_type: 'video' }).catch(() => null))?.duration || null;
+    }
+    const media = { ...(project.media || {}), audio_url: kept, audio_seconds: seconds ? Math.round(seconds) : null, audio_source: 'recorded' };
+    saveToGallery({ userId: req.user.id, kind: 'audio', url: kept, feature: 'podcast_narration', prompt: project.draft?.title || 'my recording', source: 'upload', durationSeconds: seconds });
+    const { data: updated, error } = await supabase.from('content_projects').update({ media, updated_at: now() }).eq('id', project.id).select().single();
+    if (error) throw error;
+    res.json({ success: true, data: { project: projectView(updated), audio_url: kept } });
+  } catch (err) { console.error('[content] recorded audio:', err.message); fail(res, 400, 'Could not use that recording. Try again.'); }
 });
 
 // ── Music: make the song itself from the lyrics ─────────────────────────────

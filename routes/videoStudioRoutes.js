@@ -36,6 +36,10 @@ import {
   validVoiceId, parseSpeakers, CUSTOM_SAMPLE_SCRIPT,
 } from '../config/soundStudio.js';
 import { customVoiceMap, voiceName, publicCustomVoice } from '../utils/customVoices.js';
+import { silenceBounds } from '../utils/audioOnset.js';
+// A line the user recorded themselves is marked "rec:<hash of its words>": it is never
+// re-recorded by the AI, and is flagged when the words change.
+const recordedKey = (narration) => `rec:${crypto.createHash('md5').update(String(narration || '').trim()).digest('hex')}`;
 import { listMyContent, contentText, CONTENT_KINDS } from '../utils/myContent.js';
 import fs from 'fs';
 import { planVideo, shotBudget, shotPrompt, referenceFrames, LENGTHS, LIMITS, VIDEO_PLAN_MODEL, PROMPT_VERSION, VideoError, clipModel } from '../config/videoEngine.js';
@@ -146,12 +150,14 @@ async function view(project, shots = null) {
       const v = lineVoice(project, s);
       const planned = s.narration?.trim() ? planLines(project, s, ctx) : null;
       const recordedLines = (s.lines || []).filter((l) => l.url).length;
+      const byUser = String(s.voice_key || '').startsWith('rec:');
       const recorded = !!s.voice_url || (planned?.dialog && recordedLines > 0);
-      const voice = planned ? {
+      const voice = planned || byUser ? {
+        by_user: byUser, ...(byUser ? { stale_words: s.voice_key !== recordedKey(s.narration) } : {}),
         voice_id: v.voice_id, voice_name: voiceName(v.voice_id, customs), tone: v.tone,
-        speakers: planned.dialog ? planned.lines.map((l) => ({ speaker: l.speaker, voice_name: voiceName(l.voice_id, customs) })) : null,
-        recorded, stale: recorded && s.voice_key !== planned.key,
-        too_long: !planned.dialog && !!s.voice_seconds && Number(s.voice_seconds) - Number(s.voice_lead_in || 0) > Number(s.duration_seconds || 5) + 0.5,
+        speakers: planned?.dialog ? planned.lines.map((l) => ({ speaker: l.speaker, voice_name: voiceName(l.voice_id, customs) })) : null,
+        recorded, stale: byUser ? s.voice_key !== recordedKey(s.narration) : recorded && s.voice_key !== planned?.key,
+        too_long: !planned?.dialog && !!s.voice_seconds && Number(s.voice_seconds) - Number(s.voice_lead_in || 0) > Number(s.duration_seconds || 5) + 0.5,
       } : null;
       return { ...s, prompt: a.prompt, references: a.labels, continuity: hasSlots(s.cast_slots) ? continuity[s.id] || [] : [], preview: previews[i], line: voice };
     }),
@@ -439,6 +445,20 @@ router.patch('/projects/:id/shots/:sid', authenticateToken, async (req, res) => 
     }
     up.sfx = list;
   }
+  if (b.recorded_voice_url !== undefined) {
+    if (b.recorded_voice_url) {
+      if (!HTTPS.test(String(b.recorded_voice_url))) return fail(res, 400, 'Invalid recording link');
+      try {
+        const pid = await ensureOnCloudinary(b.recorded_voice_url, 'bookofmemes/video-studio/voice-recorded');
+        const info = await cloudinary.api.resource(pid, { resource_type: 'video' });
+        const secs = Number(info.duration) || 0;
+        if (secs < 0.5 || secs > 60) return fail(res, 400, 'Keep a shot\'s recording between 1 and 60 seconds.');
+        const { leadIn } = await silenceBounds(pid, secs);
+        Object.assign(up, { voice_url: info.secure_url, voice_public_id: pid, voice_seconds: secs, voice_lead_in: leadIn, voice_key: recordedKey(b.narration ?? shot.narration), lines: [] });
+        saveToGallery({ userId: req.user.id, kind: 'audio', url: info.secure_url, feature: 'narration', prompt: shot.narration || 'my recording', source: 'upload', durationSeconds: secs, projectKind: 'video', projectId: p.id, role: 'voice_recorded' });
+      } catch (err) { console.error('[video] recorded line:', err.message); return fail(res, 400, 'Could not use that recording. Try again.'); }
+    } else Object.assign(up, { voice_url: null, voice_public_id: null, voice_seconds: null, voice_lead_in: 0, voice_key: null });
+  }
   if (b.clip_url !== undefined) {
     if (b.clip_url) {
       if (!HTTPS.test(String(b.clip_url))) return fail(res, 400, 'Invalid video link');
@@ -716,7 +736,7 @@ router.post('/projects/:id/voice-lines', authenticateToken, requireVideoPlan, as
   const ctx = await speakingContext(p);
   const shots = (await loadShots(p.id)).filter((s) => s.included && s.narration?.trim())
     .map((s) => ({ s, plan: planLines(p, s, ctx) }))
-    .filter(({ s, plan }) => (only ? only.has(s.id) : s.voice_key !== plan.key || (!s.voice_url && !(s.lines || []).some((l) => l.url))));
+    .filter(({ s, plan }) => (only ? only.has(s.id) : !String(s.voice_key || '').startsWith('rec:') && (s.voice_key !== plan.key || (!s.voice_url && !(s.lines || []).some((l) => l.url)))));
   if (!shots.length) return fail(res, 400, only ? 'Those shots have no narration.' : 'Every line is already recorded. Change a line, voice or tone to record it again.');
   if (shots.some(({ s }) => s.narration.trim().length > MAX_LINE_CHARS)) return fail(res, 400, `Keep each shot's line under ${MAX_LINE_CHARS} characters.`);
   const units = shots.reduce((n, x) => n + x.plan.lines.length, 0); // one credit per spoken line (per speaker)
