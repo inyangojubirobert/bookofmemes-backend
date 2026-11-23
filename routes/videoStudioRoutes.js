@@ -265,6 +265,62 @@ router.patch('/projects/:id', authenticateToken, async (req, res) => {
   res.json({ success: true, data: await view(data) });
 });
 
+// ── Edit videos you already have (no plan, free) ────────────────────────────
+// Any video (Gallery, a finished render, the phone) becomes a project whose
+// shots are those videos, so every finishing tool works on it: trim, frame,
+// colour, sounds, voice, music, shape, then join.
+const EDIT_MAX_CLIPS = 12;
+
+async function clipInfo(url) {
+  const publicId = await ensureOnCloudinary(url);
+  let seconds = 5;
+  try { const r = await cloudinary.api.resource(publicId, { resource_type: 'video' }); seconds = Number(r.duration) || 5; }
+  catch (err) { console.warn('[video] clip length unknown:', err.message); }
+  return { publicId, seconds };
+}
+
+router.post('/projects/edit', authenticateToken, async (req, res) => {
+  const urls = (Array.isArray(req.body?.videos) ? req.body.videos : [req.body?.video_url]).filter((u) => HTTPS.test(String(u || ''))).slice(0, EDIT_MAX_CLIPS);
+  if (!urls.length) return fail(res, 400, 'Choose a video to edit.');
+  let clips;
+  try { clips = await Promise.all(urls.map(clipInfo)); }
+  catch (err) { console.error('[video] edit import:', err.message); return fail(res, 400, 'Could not open that video. Try another one.'); }
+  const total = clips.reduce((n, c) => n + c.seconds, 0);
+  const title = String(req.body?.title || '').trim().slice(0, 120) || `Edit ${new Date().toISOString().slice(0, 10)}`;
+  const aspect = ASPECTS[req.body?.aspect] ? req.body.aspect : 'landscape';
+  const { data: project, error } = await supabase.from('video_projects').insert({
+    user_id: req.user.id, title, idea: 'Editing my own videos', source_kind: 'edit', aspect,
+    target_seconds: Math.max(5, Math.min(120, Math.round(total) || 5)), clip_seconds: Math.round(clips[0].seconds) || 5, model: 'upload', status: 'shooting',
+  }).select().single();
+  if (error) { console.error('[video] edit project:', error.message); return fail(res, 500, 'Could not start the editor'); }
+  const { error: sErr } = await supabase.from('video_shots').insert(clips.map((c, i) => ({
+    project_id: project.id, number: i + 1, scene: `Video ${i + 1}`, visual: `Your video ${i + 1}`, duration_seconds: Math.max(1, Math.round(c.seconds)),
+    source: 'upload', status: 'ready', clip_url: urls[i], clip_public_id: c.publicId,
+  })));
+  if (sErr) { await supabase.from('video_projects').delete().eq('id', project.id); return saveFail(res, sErr, 'Could not start the editor'); }
+  res.json({ success: true, data: await view(project) });
+});
+
+// Add another video to the end of a project (an edit, or a planned video).
+router.post('/projects/:id/clips', authenticateToken, async (req, res) => {
+  const p = await loadProject(req.user.id, req.params.id);
+  if (!p) return fail(res, 404, 'Video not found');
+  const url = String(req.body?.video_url || '');
+  if (!HTTPS.test(url)) return fail(res, 400, 'Choose a video to add.');
+  const shots = await loadShots(p.id);
+  if (shots.length >= LIMITS.maxShots) return fail(res, 400, `A video holds ${LIMITS.maxShots} clips at most.`);
+  let c;
+  try { c = await clipInfo(url); } catch { return fail(res, 400, 'Could not use that video. Try another one.'); }
+  const n = (shots.at(-1)?.number || 0) + 1;
+  const { error } = await supabase.from('video_shots').insert({
+    project_id: p.id, number: n, scene: `Video ${n}`, visual: `Your video ${n}`, duration_seconds: Math.max(1, Math.round(c.seconds)),
+    source: 'upload', status: 'ready', clip_url: url, clip_public_id: c.publicId,
+  });
+  if (error) return saveFail(res, error, 'Could not add the video');
+  await supabase.from('video_projects').update({ updated_at: now() }).eq('id', p.id);
+  res.json({ success: true, data: await view(p) });
+});
+
 // Edit a shot; use your own clip (from the Gallery/phone) or a start picture.
 router.patch('/projects/:id/shots/:sid', authenticateToken, async (req, res) => {
   const p = await loadProject(req.user.id, req.params.id);
