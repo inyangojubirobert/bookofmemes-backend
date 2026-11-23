@@ -14,7 +14,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 router.get('/', authenticateToken, async (req, res) => {
   try {
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 1), 100);
-    let q = supabase.from('notifications').select('id, type, title, body, reference_id, is_read, created_at')
+    let q = supabase.from('notifications').select('*') // includes data (087) when it exists
       .eq('user_id', req.user.id).order('created_at', { ascending: false }).limit(limit);
     if (req.query.before && !Number.isNaN(Date.parse(req.query.before))) q = q.lt('created_at', new Date(req.query.before).toISOString());
     const text = searchText(req.query.q); // ?q= words in the title or text

@@ -32,6 +32,8 @@ import aiCreditRoutes from "./routes/aiCreditRoutes.js";
 import bookRoutes from "./routes/bookRoutes.js";
 import videoStudioRoutes from "./routes/videoStudioRoutes.js";
 import episodeRoutes from "./routes/episodeRoutes.js";
+import pushRoutes from "./routes/pushRoutes.js";
+import { startPushJobs } from "./utils/pushJobs.js";
 import { startEpisodeRunner } from "./utils/episodePipeline.js";
 import brandRoutes from "./routes/brandRoutes.js";
 import { startJobRunner } from "./utils/studioJobs.js";
@@ -80,9 +82,11 @@ app.use("/api/ai/credits", aiCreditRoutes); // AI credits view + top-ups (migrat
 app.use("/api/book", bookRoutes); // Book Studio (migration 075)
 app.use("/api/video", videoStudioRoutes); // Video Studio, Pro/Business (migration 075)
 app.use("/api/episodes", episodeRoutes); // Auto Episode Engine, Mode 2 (migration 084)
+app.use("/api/push", pushRoutes); // push notifications + recommendations (migration 087)
 app.use("/api/brand", brandRoutes); // brand network across our apps (migration 078)
 startJobRunner();
 startEpisodeRunner(); // advances Auto Episode Engine episodes in the background
+startPushJobs(); // pop-up notifications over other apps + recommendations (087)
 app.use("/api/support", supportRoutes); // admin inbox + WhatsApp alerts (migration 069)
 
 // AI features
