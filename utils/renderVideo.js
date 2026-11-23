@@ -56,6 +56,14 @@ export async function shotTransformation(shot, project) {
   const lut = await ensureColour(shotColour(shot, project));
   if (lut) t.push({ overlay: lut });
   if ((project.finish || {}).vignette) t.push({ effect: 'vignette:35' });
+  // Episodes (084): captions from the script, so names are always spelled right; fades between scenes.
+  const caption = (project.finish || {}).captions ? captionText(shot) : '';
+  if (caption) {
+    t.push({ overlay: { font_family: 'Arial', font_size: Math.round(width / 30), font_weight: 'bold', text: caption, text_align: 'center' }, color: 'white', background: 'rgb:00000099', width: Math.round(width * 0.88), crop: 'fit' });
+    t.push({ flags: 'layer_apply', gravity: 'south', y: Math.round(height * 0.06) });
+  }
+  if (e.fade_in) t.push({ effect: 'fade:400' });
+  if (e.fade_out) t.push({ effect: 'fade:-400' });
   if (CLIP_AUDIO[e.clip_audio]) t.push({ effect: CLIP_AUDIO[e.clip_audio] });
   return t;
 }
@@ -80,6 +88,14 @@ export async function prepareShot(shot, project) {
   const up = await cloudinary.uploader.upload(url, { resource_type: 'video', folder: 'bookofmemes/video-studio/edited' });
   const cache = { key, public_id: up.public_id, seconds: Number(up.duration) || 0, has_audio: !!up.audio?.codec };
   return { publicId: up.public_id, seconds: cache.seconds, cache, reused: false };
+}
+
+/** The words shown under a shot: its lines (narration and dialogue), at most ~18 words. */
+export function captionText(shot) {
+  const text = (shot.lines || []).map((l) => l.text).filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  const w = text.split(' ');
+  return w.length > 18 ? `${w.slice(0, 18).join(' ')}…` : text;
 }
 
 const audioLayer = (publicId, { volume = null, leadIn = 0, length = null, fadeOut = 0 } = {}) => {
@@ -114,7 +130,17 @@ export async function renderFilm({ shots, project, musicPublicId = null, voiceov
   // Voice lines (per shot) and sound effects, at their exact second.
   shots.forEach((s, i) => {
     const start = timeline[i].start;
-    if (s.voice_public_id) {
+    // Episode shots (084) carry several lines (dialogue + narration): one after another.
+    const spoken = (s.lines || []).filter((l) => l.public_id);
+    if (spoken.length) {
+      let at = start + 0.2;
+      for (const l of spoken) {
+        if (at >= total - 0.3) break;
+        t.push(...audioLayer(l.public_id, { leadIn: Number(l.lead_in) || 0 }));
+        t.push({ flags: 'layer_apply', start_offset: +at.toFixed(2) });
+        at += Math.max(0.5, (Number(l.seconds) || 2) - (Number(l.lead_in) || 0)) + 0.25;
+      }
+    } else if (s.voice_public_id) {
       const offset = start + Math.max(0, Number(s.voice_offset ?? 0.2));
       if (offset < total - 0.3) { t.push(...audioLayer(s.voice_public_id, { leadIn: Number(s.voice_lead_in) || 0 })); t.push({ flags: 'layer_apply', start_offset: +offset.toFixed(2) }); }
     }
@@ -140,4 +166,65 @@ export async function renderFilm({ shots, project, musicPublicId = null, voiceov
     url: up.secure_url, seconds: up.duration, publicId: up.public_id, timeline,
     caches: Object.fromEntries(shots.map((s, i) => [s.id, prepared[i].cache])),
   };
+}
+
+/**
+ * Joins finished parts (title card, scene renders, end card) into one video, with the
+ * music under all of it. Parts are already edited, so this is a plain splice; it keeps
+ * each Cloudinary URL short (a whole episode in one URL would be too long).
+ */
+export async function joinParts({ parts, musicPublicId = null, musicLevel = 'low', folder = 'bookofmemes/video-studio/episodes' }) {
+  if (!parts.length) throw new Error('Nothing to join');
+  const total = parts.reduce((n, p) => n + (Number(p.seconds) || 0), 0);
+  const t = [];
+  for (const p of parts.slice(1)) { t.push({ overlay: `video:${layerId(p.publicId)}`, flags: 'splice' }); t.push({ flags: 'layer_apply' }); }
+  if (musicPublicId) {
+    t.push(...audioLayer(musicPublicId, { volume: MUSIC_LEVELS[musicLevel] ?? MUSIC_LEVELS.low, length: total, fadeOut: total > 6 ? 2.5 : 0 }));
+    t.push({ flags: 'layer_apply' });
+  }
+  const url = cloudinary.url(parts[0].publicId, { resource_type: 'video', format: 'mp4', transformation: t });
+  await fetchBuilt(url);
+  const up = await cloudinary.uploader.upload(url, { resource_type: 'video', folder });
+  return { url: up.secure_url, seconds: Number(up.duration) || total, publicId: up.public_id };
+}
+
+/** A card (title, "next episode") as a short video: white words on black, a slow push-in. */
+export async function makeCard({ baseImageId, lines, seconds = 3, aspect = 'landscape', folder = 'bookofmemes/video-studio/cards' }) {
+  const [width, height] = ASPECTS[aspect] || ASPECTS.landscape;
+  const t = [{ width, height, crop: 'fill' }, { effect: 'brightness:-100' }, { effect: 'colorize:100', color: 'black' }];
+  const shown = lines.filter(Boolean).slice(0, 3);
+  shown.forEach((text, i) => {
+    const big = i === 0;
+    t.push({ overlay: { font_family: 'Arial', font_size: Math.round(width / (big ? 16 : 28)), font_weight: big ? 'bold' : 'normal', text: String(text).slice(0, 80), text_align: 'center' }, color: big ? 'white' : '#F59E0B', width: Math.round(width * 0.85), crop: 'fit' });
+    t.push({ flags: 'layer_apply', gravity: 'center', y: Math.round((i - (shown.length - 1) / 2) * height * 0.12) });
+  });
+  t.push({ effect: `zoompan:du_${seconds};from_(g_center;zoom_1);to_(g_center;zoom_1.06)` });
+  const url = cloudinary.url(baseImageId, { resource_type: 'image', format: 'mp4', transformation: t });
+  await fetchBuilt(url);
+  const up = await cloudinary.uploader.upload(url, { resource_type: 'video', folder });
+  return { url: up.secure_url, seconds: Number(up.duration) || seconds, publicId: up.public_id };
+}
+
+/** An animated still: a keyframe with a slow camera move, exactly `seconds` long. */
+export async function animateStill({ imageId, seconds, move = 'push', aspect = 'landscape', folder = 'bookofmemes/video-studio/stills-motion' }) {
+  const [width, height] = ASPECTS[aspect] || ASPECTS.landscape;
+  const du = Math.max(2, Math.min(12, Math.round(seconds * 10) / 10));
+  const moves = {
+    push: 'from_(g_center;zoom_1);to_(g_center;zoom_1.18)',
+    pull: 'from_(g_center;zoom_1.25);to_(g_center;zoom_1)',
+    pan: 'from_(g_west;zoom_1.2);to_(g_east;zoom_1.2)',
+    tilt: 'from_(g_north;zoom_1.2);to_(g_south;zoom_1.2)',
+    close: 'from_(g_center;zoom_1.1);to_(g_center;zoom_1.4)',
+  };
+  const t = [{ width, height, crop: 'fill' }, { effect: `zoompan:du_${du};${moves[move] || moves.push}` }, { width, height, crop: 'fill' }];
+  const url = cloudinary.url(imageId, { resource_type: 'image', format: 'mp4', transformation: t });
+  await fetchBuilt(url);
+  const up = await cloudinary.uploader.upload(url, { resource_type: 'video', folder });
+  return { url: up.secure_url, seconds: Number(up.duration) || du, publicId: up.public_id };
+}
+
+/** Public id of an image on our Cloudinary (or null). */
+export function imagePublicId(url) {
+  const m = String(url || '').match(new RegExp(`res\.cloudinary\.com/${process.env.CLOUDINARY_CLOUD_NAME}/image/upload/(?:[^/]+/)*?(?:v\d+/)(.+?)\.[a-z0-9]+$`, 'i'));
+  return m ? m[1] : null;
 }

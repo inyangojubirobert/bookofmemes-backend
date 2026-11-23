@@ -92,6 +92,13 @@ export const ACTION_COSTS = {
   // Video Studio finishing (config/soundStudio.js, migration 083)
   sfxPerSecond: { fast: 2, premium: 2 },      // a sound effect (Mirelo SFX 1.5) or sound made for a clip, per second
   voiceLine: { fast: 1, premium: 1 },         // one spoken line (≤400 characters) in a chosen voice and tone
+  // Auto Episode Engine (config/episodeEngine.js, utils/episodePipeline.js, migration 084)
+  episodeBreakdown: { fast: 9, premium: 9 },      // script → cast, scenes, shots, lines, sounds (episodes up to ~2 min)
+  episodeBreakdownLong: { fast: 15, premium: 15 }, // ... for 3-5 minute episodes (up to 60 shots)
+  keyframe: { fast: 13, premium: 13 },            // a shot's still from the cast references + the continuity check of it
+  stillMotion: { fast: 1, premium: 1 },           // turn a keyframe into a moving shot (slow zoom / pan)
+  episodeRender: { fast: 4, premium: 4 },         // assemble scenes, title and end cards, music into the episode
+  episodeLedger: { fast: 3, premium: 3 },         // write the continuity ledger for the next episode
   backgroundRemoval: { fast: 2, premium: 2 }, // cut a cast picture out of its background (ideogram remove-background, $0.01)
 };
 
@@ -123,6 +130,12 @@ export const ACTION_COSTS = {
 //   videoRender      Cloudinary splice (measured 4 s for 2 clips; plan quota, not per call) ≈ $0.0100 budget
 //   sfxPerSecond     Mirelo SFX 1.5, measured $0.01 a second (2 s $0.02, 10 s $0.10, a 5 s clip $0.05)
 //   voiceLine        Fish Audio S2.1 pro, ≤400 characters ≈ 27 s at $0.0135 a minute (measured $0.0014 a line) ≈ $0.0061
+//   episodeBreakdown     ≤12k input (script ≤30k chars + catalog) + 8,000 output                ≈ $0.0520
+//   episodeBreakdownLong ≤12k input + 16,000 output (up to 60 shots)                           ≈ $0.0920
+//   keyframe         FLUX.2 [pro] with references $0.075 + Haiku vision check (≤4 pictures) ≈ $0.0075 ≈ $0.0825
+//   stillMotion      Cloudinary zoompan + upload (plan quota)                                  ≈ $0.0050 budget
+//   episodeRender    several Cloudinary splices + cards (plan quota)                           ≈ $0.0200 budget
+//   episodeLedger    ≤6k input + 2,000 output                                                  ≈ $0.0160
 //   songPerMinute    ACE-Step 1.5 XL turbo, measured $0.00225 per 60 s song               ≈ $0.0023
 export const ACTION_COST_USD = {
   research: { fast: 0.0065, premium: 0.0065 },
@@ -149,6 +162,12 @@ export const ACTION_COST_USD = {
   songPerMinute: { fast: 0.0023, premium: 0.0023 },
   backgroundRemoval: { fast: 0.01, premium: 0.01 },
   sfxPerSecond: { fast: 0.01, premium: 0.01 },
+  episodeBreakdown: { fast: 0.052, premium: 0.052 },
+  episodeBreakdownLong: { fast: 0.092, premium: 0.092 },
+  keyframe: { fast: 0.0825, premium: 0.0825 },
+  stillMotion: { fast: 0.005, premium: 0.005 },
+  episodeRender: { fast: 0.02, premium: 0.02 },
+  episodeLedger: { fast: 0.016, premium: 0.016 },
   voiceLine: { fast: 0.0061, premium: 0.0061 },
 };
 

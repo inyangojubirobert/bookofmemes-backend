@@ -31,6 +31,8 @@ import studioJobRoutes from "./routes/studioJobRoutes.js";
 import aiCreditRoutes from "./routes/aiCreditRoutes.js";
 import bookRoutes from "./routes/bookRoutes.js";
 import videoStudioRoutes from "./routes/videoStudioRoutes.js";
+import episodeRoutes from "./routes/episodeRoutes.js";
+import { startEpisodeRunner } from "./utils/episodePipeline.js";
 import brandRoutes from "./routes/brandRoutes.js";
 import { startJobRunner } from "./utils/studioJobs.js";
 import supportRoutes, { startSupportAlertTimer } from "./routes/supportRoutes.js";
@@ -77,8 +79,10 @@ app.use("/api/studio", studioJobRoutes); // background jobs for long media work 
 app.use("/api/ai/credits", aiCreditRoutes); // AI credits view + top-ups (migration 075)
 app.use("/api/book", bookRoutes); // Book Studio (migration 075)
 app.use("/api/video", videoStudioRoutes); // Video Studio, Pro/Business (migration 075)
+app.use("/api/episodes", episodeRoutes); // Auto Episode Engine, Mode 2 (migration 084)
 app.use("/api/brand", brandRoutes); // brand network across our apps (migration 078)
 startJobRunner();
+startEpisodeRunner(); // advances Auto Episode Engine episodes in the background
 app.use("/api/support", supportRoutes); // admin inbox + WhatsApp alerts (migration 069)
 
 // AI features
