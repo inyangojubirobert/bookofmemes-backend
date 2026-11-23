@@ -89,6 +89,9 @@ export const ACTION_COSTS = {
   videoRender: { fast: 2, premium: 2 },       // join the clips + voice-over/music into one MP4
   // Music (ACE-Step 1.5 XL turbo on Runware)
   songPerMinute: { fast: 1, premium: 1 },     // a song or instrumental, per started minute
+  // Video Studio finishing (config/soundStudio.js, migration 083)
+  sfxPerSecond: { fast: 2, premium: 2 },      // a sound effect (Mirelo SFX 1.5) or sound made for a clip, per second
+  voiceLine: { fast: 1, premium: 1 },         // one spoken line (≤400 characters) in a chosen voice and tone
   backgroundRemoval: { fast: 2, premium: 2 }, // cut a cast picture out of its background (ideogram remove-background, $0.01)
 };
 
@@ -117,6 +120,8 @@ export const ACTION_COSTS = {
 //   videoPlan        ≤5k input (storyline or story memory) + 2,500 output (≤12 shots)    ≈ $0.0175
 //   videoPlanWithReference  + 3 video frames read (≈4.8k input)                           ≈ $0.0223
 //   videoRender      Cloudinary splice (measured 4 s for 2 clips; plan quota, not per call) ≈ $0.0100 budget
+//   sfxPerSecond     Mirelo SFX 1.5, measured $0.01 a second (2 s $0.02, 10 s $0.10, a 5 s clip $0.05)
+//   voiceLine        Fish Audio S2.1 pro, ≤400 characters ≈ 27 s at $0.0135 a minute (measured $0.0014 a line) ≈ $0.0061
 //   songPerMinute    ACE-Step 1.5 XL turbo, measured $0.00225 per 60 s song               ≈ $0.0023
 export const ACTION_COST_USD = {
   research: { fast: 0.0065, premium: 0.0065 },
@@ -142,6 +147,8 @@ export const ACTION_COST_USD = {
   videoRender: { fast: 0.0100, premium: 0.0100 },
   songPerMinute: { fast: 0.0023, premium: 0.0023 },
   backgroundRemoval: { fast: 0.01, premium: 0.01 },
+  sfxPerSecond: { fast: 0.01, premium: 0.01 },
+  voiceLine: { fast: 0.0061, premium: 0.0061 },
 };
 
 // ── Top-ups: extra AI credits bought with wallet balance ────────────────────
@@ -162,13 +169,14 @@ export const CORRECTION_COST_USD = 0.0011;
 // title never costs less in AI credits than those credits sell for.
 export const NEW_TITLE_AI_CREDITS = 20;
 
-export function creditsFor(action, { premium = false, reference = false, seconds = 0 } = {}) {
-  const key = action === 'narration' ? 'narrationPerMinute' : action === 'song' ? 'songPerMinute' : action;
+export function creditsFor(action, { premium = false, reference = false, seconds = 0, units = 1 } = {}) {
+  const key = action === 'narration' ? 'narrationPerMinute' : action === 'song' ? 'songPerMinute' : action === 'sfx' ? 'sfxPerSecond' : action;
   const c = ACTION_COSTS[key];
   if (!c) throw new Error(`unknown AI action ${action}`);
   let n = premium ? (reference && c.premiumWithReference ? c.premiumWithReference : c.premium) : c.fast;
   if (action === 'narration' || action === 'song') n *= Math.max(1, Math.ceil(seconds / 60));
-  return n;
+  if (action === 'sfx') n *= Math.max(1, Math.ceil(seconds));
+  return n * Math.max(1, Math.floor(units) || 1); // units: e.g. several voice lines at once
 }
 
 // Every Play subscription has exactly one auto-renewing monthly base plan with this id.

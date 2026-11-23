@@ -6,10 +6,16 @@
 //               PATCH /projects/:id         edit the look card / title; free
 //               PATCH /projects/:id/shots/:sid  edit a shot, use your own clip or a start picture; free
 //   2. Shoot    POST /projects/:id/shots/:sid/generate   one clip, as a background job        (video credits)
-//   3. Sound    POST /projects/:id/voiceover  the shots' narration as one voice track         (narration credits / minute)
-//               POST /projects/:id/music      an instrumental soundtrack                       (song credits / minute)
-//               PATCH /projects/:id { music_url } to use a song from the Gallery instead; free
-//   4. Render   POST /projects/:id/render     join the clips + sound into one MP4             (videoRender)
+//   3. Finish   (migration 083, config/soundStudio.js) GET /finishing = voices, tones, music, sounds, looks, prices
+//               PATCH /projects/:id/shots/:sid { trim_start, trim_end, edit: { zoom, anchor, look, strength, grade, clip_audio },
+//                     light, voice_id, voice_tone, sfx: [...] }                            edit a made clip; free
+//               PATCH /projects/:id { aspect, finish, voice, light, music_url }           whole video; free (stock music free)
+//               POST /voice-preview                 hear a voice + tone on your words  (voiceLine)
+//               POST /projects/:id/voice-lines      each shot's line, placed on its shot (voiceLine × lines)
+//               POST /projects/:id/sfx              a sound effect from words           (sfx credits / second)
+//               POST /projects/:id/shots/:sid/sound sound made for the clip itself      (sfx credits / second)
+//               POST /projects/:id/music            soundtrack from theme/mood/tempo    (song credits / minute)
+//   4. Render   POST /projects/:id/render     edited clips + voices + sounds + music → one MP4 (videoRender)
 import express from 'express';
 import crypto from 'crypto';
 import { supabase } from '../config/db.js';
@@ -21,7 +27,14 @@ import { createJob, publicJob } from '../utils/studioJobs.js';
 import { saveToGallery } from '../utils/gallery.js';
 import { narrateScript, speakableText, estimateSeconds, MAX_SCRIPT_CHARS } from '../utils/podcastNarration.js';
 import { generateSong } from '../utils/music.js';
-import { renderVideo, ensureOnCloudinary } from '../utils/renderVideo.js';
+import { renderFilm, editedPreview, ensureOnCloudinary } from '../utils/renderVideo.js';
+import { speakLine, makeSoundEffect, soundForClip, SFX_MODEL } from '../utils/soundMaker.js';
+import {
+  VOICES, TONES, SPEEDS, MAX_LINE_CHARS, voiceById, cleanVoice, MUSIC_THEMES, MOODS, TEMPOS, MUSIC_LEVELS, musicPrompt,
+  SFX_CATEGORIES, SFX_LEVELS, SFX_MAX_SECONDS, SFX_PER_SHOT, cleanSfx, LOOKS, LOOK_STRENGTHS, GRADE_KEYS, ASPECTS, ZOOMS, ANCHORS,
+  LIGHTING, LIGHT_COLOURS, cleanLight, lightText, cleanEdit, cleanFinish, VOICE_MODEL,
+} from '../config/soundStudio.js';
+import fs from 'fs';
 import { planVideo, shotBudget, shotPrompt, referenceFrames, LENGTHS, LIMITS, VIDEO_PLAN_MODEL, PROMPT_VERSION, VideoError, clipModel } from '../config/videoEngine.js';
 import { assembleShot, cleanAsset, cleanSlots, continuityNotes, hasSlots, readiness, SLOTS, POSITIONS, POSES, EXPRESSIONS, LIMITS as CAST_LIMITS } from '../config/videoCast.js';
 import { prepareAssetImage, BACKGROUND_MODEL } from '../utils/assetImages.js';
@@ -63,16 +76,49 @@ async function loadAssets(userId) {
   return Object.fromEntries((data || []).map((a) => [a.id, a]));
 }
 
+// Stock sounds, music and voice samples made once by scripts/buildSoundLibrary.js (free to use).
+let LIBRARY = { voices: {}, music: [], sfx: [] };
+try { LIBRARY = { ...LIBRARY, ...JSON.parse(fs.readFileSync(new URL('../config/soundLibrary.json', import.meta.url), 'utf8')) }; }
+catch { console.warn('[video] config/soundLibrary.json missing: run node scripts/buildSoundLibrary.js'); }
+const libraryUrls = () => new Set([...LIBRARY.music, ...LIBRARY.sfx].map((x) => x.url));
+
+// Missing 083 columns → tell the owner which migration to run instead of a bare 500.
+const needs083 = (err) => /column|schema cache|PGRST204/i.test(err?.message || '');
+const saveFail = (res, err, what = 'Could not save') => (needs083(err)
+  ? fail(res, 503, 'Video finishing is not switched on yet (migration 083).', { code: 'needs_migration' })
+  : fail(res, 500, what));
+
+/** The prompt (+ cast references) a shot's clip is made from; lighting goes first so it's never cut off. */
+function promptFor(project, shot, assets) {
+  const light = lightText(shot.light || project.light);
+  if (!hasSlots(shot.cast_slots)) return { prompt: [light, shotPrompt(project, shot)].filter(Boolean).join(' ').slice(0, 1000), references: [], labels: [] };
+  const a = assembleShot(project, shot, assets);
+  return { prompt: [light, a.prompt].filter(Boolean).join(' '), references: a.references, labels: a.labels };
+}
+
+const voiceKey = (text, v) => crypto.createHash('md5').update([String(text || '').trim(), v.voice_id, v.tone, v.speed].join('|')).digest('hex');
+/** The voice a shot's line is said in: the shot's own choice over the video's. */
+const lineVoice = (project, shot) => {
+  const base = cleanVoice(project.voice || {});
+  return { ...base, voice_id: shot.voice_id || base.voice_id, tone: shot.voice_tone || base.tone };
+};
+
 async function view(project, shots = null) {
   const list = shots || await loadShots(project.id);
   const assets = list.some((s) => hasSlots(s.cast_slots)) ? await loadAssets(project.user_id) : {};
   const continuity = continuityNotes(list, assets);
+  const previews = await Promise.all(list.map((s) => (s.clip_public_id ? editedPreview(s, project).catch(() => null) : null)));
   return {
     ...project,
-    shots: list.map((s) => {
-      if (!hasSlots(s.cast_slots)) return { ...s, prompt: shotPrompt(project, s), references: [], continuity: [] };
-      const a = assembleShot(project, s, assets);
-      return { ...s, prompt: a.prompt, references: a.labels, continuity: continuity[s.id] || [] };
+    shots: list.map((s, i) => {
+      const a = promptFor(project, s, assets);
+      const v = lineVoice(project, s);
+      const voice = s.narration?.trim() ? {
+        voice_id: v.voice_id, voice_name: voiceById(v.voice_id).name, tone: v.tone,
+        recorded: !!s.voice_url, stale: !!s.voice_url && s.voice_key !== voiceKey(s.narration, v),
+        too_long: !!s.voice_seconds && Number(s.voice_seconds) - Number(s.voice_lead_in || 0) > Number(s.duration_seconds || 5) + 0.5,
+      } : null;
+      return { ...s, prompt: a.prompt, references: a.labels, continuity: hasSlots(s.cast_slots) ? continuity[s.id] || [] : [], preview: previews[i], line: voice };
     }),
     ready: list.filter((s) => s.included && s.status === 'ready').length,
     included: list.filter((s) => s.included).length,
@@ -204,8 +250,18 @@ router.patch('/projects/:id', authenticateToken, async (req, res) => {
     if (b[k] && !HTTPS.test(String(b[k]))) return fail(res, 400, 'Invalid link');
     up[k] = b[k] || null;
   }
+  if (b.music_url !== undefined) {
+    // A track from the stock library or the Gallery; kept in the versions list.
+    const lib = LIBRARY.music.find((m) => m.url === b.music_url);
+    up.music_title = b.music_url ? String(b.music_title || lib?.title || 'My song').slice(0, 80) : null;
+    if (b.music_url) up.music_history = [...(p.music_history || []).filter((m) => m.url !== b.music_url), { url: b.music_url, title: up.music_title, at: now() }].slice(-12);
+  }
+  if (b.aspect !== undefined && ASPECTS[b.aspect]) up.aspect = b.aspect;
+  if (b.finish && typeof b.finish === 'object') up.finish = cleanFinish(b.finish, p.finish || {});
+  if (b.voice && typeof b.voice === 'object') up.voice = cleanVoice(b.voice, p.voice || {});
+  if (b.light !== undefined) up.light = cleanLight(b.light);
   const { data, error } = await supabase.from('video_projects').update(up).eq('id', p.id).select().single();
-  if (error) return fail(res, 500, 'Could not save');
+  if (error) return saveFail(res, error);
   res.json({ success: true, data: await view(data) });
 });
 
@@ -231,6 +287,20 @@ router.patch('/projects/:id/shots/:sid', authenticateToken, async (req, res) => 
     up.cast_slots = cleanSlots(b.cast_slots || {}, await loadAssets(req.user.id));
     up.still_url = null; // the scene changed: the old still no longer matches it
   }
+  if (b.edit && typeof b.edit === 'object') up.edit = cleanEdit(b.edit, shot.edit || {});
+  if (b.light !== undefined) up.light = cleanLight(b.light);
+  if (b.voice_id !== undefined) up.voice_id = b.voice_id && VOICES.some((v) => v.id === b.voice_id) ? b.voice_id : null;
+  if (b.voice_tone !== undefined) up.voice_tone = b.voice_tone && TONES.some((t) => t.id === b.voice_tone) ? b.voice_tone : null;
+  if (b.sfx !== undefined) {
+    // Each sound: from the stock library, or the user's own (made here / Gallery) on our Cloudinary.
+    const list = cleanSfx(b.sfx, Number(shot.duration_seconds) || 15);
+    for (const x of list) {
+      if (!x.public_id || !String(x.url).includes('/' + x.public_id + '.')) {
+        try { x.public_id = await ensureOnCloudinary(x.url); } catch { return fail(res, 400, 'Could not use the sound "' + x.label + '"'); }
+      }
+    }
+    up.sfx = list;
+  }
   if (b.clip_url !== undefined) {
     if (b.clip_url) {
       if (!HTTPS.test(String(b.clip_url))) return fail(res, 400, 'Invalid video link');
@@ -239,7 +309,7 @@ router.patch('/projects/:id/shots/:sid', authenticateToken, async (req, res) => 
     } else Object.assign(up, { clip_url: null, clip_public_id: null, status: 'planned', source: 'ai' });
   }
   const { error } = await supabase.from('video_shots').update(up).eq('id', shot.id);
-  if (error) return fail(res, 500, 'Could not save the shot');
+  if (error) return saveFail(res, error, 'Could not save the shot');
   res.json({ success: true, data: await view(p) });
 });
 
@@ -258,13 +328,9 @@ router.post('/projects/:id/shots/:sid/generate', authenticateToken, requireVideo
   // Cast slots (migration 079): the assembled prompt, and — when there's no
   // start picture — the cast's cropped references (a start picture already
   // carries them, and the model can't take both).
-  let prompt = shotPrompt(p, shot);
-  let referenceImages = null;
-  if (hasSlots(shot.cast_slots)) {
-    const a = assembleShot(p, shot, await loadAssets(req.user.id));
-    prompt = a.prompt;
-    if (!withStart && a.references.length) referenceImages = a.references;
-  }
+  const a = promptFor(p, shot, hasSlots(shot.cast_slots) ? await loadAssets(req.user.id) : {});
+  const prompt = a.prompt;
+  const referenceImages = !withStart && a.references.length ? a.references : null;
   const cost = creditsFor('video', { premium: true, reference: withStart || !!referenceImages });
   const reservation = status.remaining >= cost ? await reserveCredits(req.user.id, status.plan, cost, `shot:${requestId}`, 30) : null;
   if (!reservation) {
@@ -362,7 +428,7 @@ router.post('/projects/:id/shots/:sid/still', authenticateToken, requireVideoPla
   return runCharged(req, res, { kind: 'still', action: 'image', projectId: p.id, costOpts: { reference: a.references.length > 0 }, log: { feature: 'image', provider: 'runware', model } }, async () => {
     const task = {
       taskType: 'imageInference', taskUUID: crypto.randomUUID(), model, width, height, numberResults: 1, outputFormat: 'JPG', includeCost: true,
-      positivePrompt: `A single film frame, the first frame of this shot.\n${a.prompt}`,
+      positivePrompt: `A single film frame, the first frame of this shot.\n${[lightText(shot.light || p.light), a.prompt].filter(Boolean).join(' ')}`,
       ...(a.references.length ? { inputs: { referenceImages: a.references } } : {}),
     };
     const { data } = await callRunwareTasks([task]);
@@ -398,7 +464,136 @@ router.post('/projects/:id/shots/:sid/version', authenticateToken, async (req, r
   res.json({ success: true, data: await view(p) });
 });
 
-// ── 3. Sound ────────────────────────────────────────────────────────────────
+// ── 3. Finishing: voices, sounds, music, light & colour (migration 083) ─────
+// Everything the app needs to choose from, with prices. Stock items are free.
+router.get('/finishing', authenticateToken, async (req, res) => {
+  const status = await creditStatus(req.user.id).catch(() => null);
+  const premium = !!status?.plan?.premiumModels;
+  res.json({ success: true, data: {
+    voices: VOICES.map((v) => ({ id: v.id, name: v.name, gender: v.gender, age: v.age, accent: v.accent, group: v.group, about: v.about, sample_url: LIBRARY.voices?.[v.id] || null })),
+    tones: TONES.map(({ id, label }) => ({ id, label })), speeds: SPEEDS, max_line_chars: MAX_LINE_CHARS,
+    music: { themes: MUSIC_THEMES.map(({ id, label }) => ({ id, label })), moods: MOODS, tempos: Object.keys(TEMPOS), levels: Object.keys(MUSIC_LEVELS), library: LIBRARY.music },
+    sfx: { categories: SFX_CATEGORIES, library: LIBRARY.sfx, levels: Object.keys(SFX_LEVELS), max_seconds: SFX_MAX_SECONDS, per_shot: SFX_PER_SHOT },
+    looks: Object.entries(LOOKS).map(([id, l]) => ({ id, label: l.label, about: l.about })), strengths: Object.keys(LOOK_STRENGTHS), grade_keys: GRADE_KEYS,
+    lighting: LIGHTING.map(({ id, label }) => ({ id, label })), light_colours: LIGHT_COLOURS.map(({ id, label }) => ({ id, label })),
+    aspects: Object.keys(ASPECTS), zooms: ZOOMS, anchors: ANCHORS,
+    costs: {
+      voice_line: creditsFor('voiceLine', { premium }), sfx_per_second: creditsFor('sfx', { premium, seconds: 1 }),
+      music_per_minute: creditsFor('song', { premium, seconds: 60 }), render: creditsFor('videoRender', { premium }),
+    },
+  } });
+});
+
+// Hear a voice + tone on your own words before choosing it (1 voice line).
+router.post('/voice-preview', authenticateToken, requireVideoPlan, async (req, res) => {
+  const text = String(req.body?.text || '').trim().slice(0, 200);
+  if (text.length < 3) return fail(res, 400, 'Type a line to hear.');
+  const v = cleanVoice(req.body || {});
+  return runCharged(req, res, { kind: 'voice_preview', action: 'voiceLine', log: { feature: 'voice', provider: 'runware', model: VOICE_MODEL } }, async () => {
+    const r = await speakLine(text, { voiceId: v.voice_id, tone: v.tone, speed: v.speed, folder: 'bookofmemes/video-studio/voice-previews' });
+    return { data: { url: r.url, seconds: r.seconds, voice: r.voice }, providerCost: r.cost, durationSeconds: r.seconds, outputUrl: r.url };
+  });
+});
+
+// Record each shot's line in its voice and tone; placed at the start of its shot.
+// { shot_ids?: [] } — default: every included line not recorded yet or changed since.
+router.post('/projects/:id/voice-lines', authenticateToken, requireVideoPlan, async (req, res) => {
+  const p = await loadProject(req.user.id, req.params.id);
+  if (!p) return fail(res, 404, 'Video not found');
+  const only = Array.isArray(req.body?.shot_ids) ? new Set(req.body.shot_ids.map(String)) : null;
+  const shots = (await loadShots(p.id)).filter((s) => s.included && s.narration?.trim())
+    .filter((s) => (only ? only.has(s.id) : !s.voice_url || s.voice_key !== voiceKey(s.narration, lineVoice(p, s))));
+  if (!shots.length) return fail(res, 400, only ? 'Those shots have no narration.' : 'Every line is already recorded. Change a line, voice or tone to record it again.');
+  if (shots.some((s) => s.narration.trim().length > MAX_LINE_CHARS)) return fail(res, 400, `Keep each shot's line under ${MAX_LINE_CHARS} characters.`);
+  return runCharged(req, res, { kind: 'voice_lines', action: 'voiceLine', projectId: p.id, costOpts: { units: shots.length }, log: { feature: 'voice', provider: 'runware', model: VOICE_MODEL } }, async () => {
+    let cost = 0, seconds = 0;
+    for (let i = 0; i < shots.length; i += 3) {
+      await Promise.all(shots.slice(i, i + 3).map(async (s) => {
+        const v = lineVoice(p, s);
+        const r = await speakLine(s.narration, { voiceId: v.voice_id, tone: v.tone, speed: v.speed });
+        cost += Number(r.cost) || 0; seconds += r.seconds;
+        const { error } = await supabase.from('video_shots').update({ voice_url: r.url, voice_public_id: r.public_id, voice_seconds: r.seconds, voice_lead_in: r.lead_in, voice_key: voiceKey(s.narration, v), updated_at: now() }).eq('id', s.id);
+        if (error) throw Object.assign(new Error(needs083(error) ? 'Video finishing is not switched on yet (migration 083).' : 'Could not save the line'), { status: 400 });
+        saveToGallery({ userId: req.user.id, kind: 'audio', url: r.url, feature: 'narration', prompt: s.narration, model: VOICE_MODEL, durationSeconds: r.seconds, projectKind: 'video', projectId: p.id, role: 'voice_line', provider: 'runware', providerCost: r.cost });
+      }));
+    }
+    return { data: { project: await view(p), lines: shots.length }, providerCost: cost || null, durationSeconds: seconds };
+  });
+});
+
+// A sound effect from words (1-10 s). With shot_id it's also placed in that shot at `at` seconds.
+router.post('/projects/:id/sfx', authenticateToken, requireVideoPlan, async (req, res) => {
+  const p = await loadProject(req.user.id, req.params.id);
+  if (!p) return fail(res, 404, 'Video not found');
+  const prompt = String(req.body?.prompt || '').trim();
+  if (prompt.length < 3) return fail(res, 400, 'Describe the sound (e.g. "water poured into a cup").');
+  const seconds = Math.max(1, Math.min(SFX_MAX_SECONDS, Math.round(Number(req.body?.seconds) || 3)));
+  let shot = null;
+  if (req.body?.shot_id) {
+    if (!UUID.test(String(req.body.shot_id))) return fail(res, 404, 'Shot not found');
+    ({ data: shot } = await supabase.from('video_shots').select('*').eq('id', req.body.shot_id).eq('project_id', p.id).maybeSingle());
+    if (!shot) return fail(res, 404, 'Shot not found');
+    if ((shot.sfx || []).length >= SFX_PER_SHOT) return fail(res, 400, `A shot holds ${SFX_PER_SHOT} sounds. Remove one first.`);
+  }
+  return runCharged(req, res, { kind: 'sfx', action: 'sfx', projectId: p.id, costOpts: { seconds }, log: { feature: 'voice', provider: 'runware', model: SFX_MODEL } }, async () => {
+    const r = await makeSoundEffect(prompt, seconds);
+    const sound = { id: `own-${r.public_id.split('/').pop()}`, label: prompt.slice(0, 60), url: r.url, public_id: r.public_id, seconds: r.seconds, lead_in: r.lead_in };
+    saveToGallery({ userId: req.user.id, kind: 'audio', url: r.url, feature: 'sfx', prompt, model: SFX_MODEL, durationSeconds: r.seconds, projectKind: 'video', projectId: p.id, role: 'sfx', provider: 'runware', providerCost: r.cost });
+    if (shot) {
+      const list = cleanSfx([...(shot.sfx || []), { ...sound, at: Number(req.body?.at) || 0, level: req.body?.level || 'normal' }], Number(shot.duration_seconds) || 15);
+      list[list.length - 1].public_id = r.public_id;
+      const { error } = await supabase.from('video_shots').update({ sfx: list, updated_at: now() }).eq('id', shot.id);
+      if (error) throw Object.assign(new Error(needs083(error) ? 'Video finishing is not switched on yet (migration 083).' : 'Could not add the sound to the shot'), { status: 400 });
+    }
+    return { data: { sound, project: await view(p) }, providerCost: r.cost, durationSeconds: r.seconds, outputUrl: r.url };
+  });
+});
+
+// Sound made to match what happens in the clip (footsteps, doors, rain…), as a new version of the clip.
+router.post('/projects/:id/shots/:sid/sound', authenticateToken, requireVideoPlan, async (req, res) => {
+  const p = await loadProject(req.user.id, req.params.id);
+  if (!p || !UUID.test(req.params.sid)) return fail(res, 404, 'Shot not found');
+  const { data: shot } = await supabase.from('video_shots').select('*').eq('id', req.params.sid).eq('project_id', p.id).maybeSingle();
+  if (!shot) return fail(res, 404, 'Shot not found');
+  if (shot.status !== 'ready' || !shot.clip_public_id) return fail(res, 400, 'Make the clip first.');
+  const seconds = Math.max(1, Math.ceil(Number(shot.edit_cache?.seconds) || Number(shot.duration_seconds) || 5));
+  return runCharged(req, res, { kind: 'clip_sound', action: 'sfx', projectId: p.id, costOpts: { seconds }, log: { feature: 'video', provider: 'runware', model: SFX_MODEL } }, async () => {
+    const clipUrl = `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/video/upload/${shot.clip_public_id}.mp4`;
+    const r = await soundForClip(clipUrl);
+    const history = [...(shot.clip_history || [])];
+    if (!history.some((h) => h.url === shot.clip_url) && shot.clip_url) history.push({ url: shot.clip_url, public_id: shot.clip_public_id, at: shot.updated_at });
+    history.push({ url: r.url, public_id: r.public_id, sound: true, model: SFX_MODEL, at: now() });
+    const { error } = await supabase.from('video_shots').update({
+      clip_url: r.url, clip_public_id: r.public_id, source: 'sound', clip_history: history.slice(-20),
+      edit: { ...(shot.edit || {}), clip_audio: 'keep' }, updated_at: now(),
+    }).eq('id', shot.id);
+    if (error) throw Object.assign(new Error(needs083(error) ? 'Video finishing is not switched on yet (migration 083).' : 'Could not save the clip'), { status: 400 });
+    saveToGallery({ userId: req.user.id, kind: 'video', url: r.url, feature: 'video', prompt: `sound for shot ${shot.number}`, model: SFX_MODEL, durationSeconds: r.seconds, projectKind: 'video', projectId: p.id, role: 'shot', provider: 'runware', providerCost: r.cost });
+    return { data: { project: await view(p) }, providerCost: r.cost, durationSeconds: r.seconds, outputUrl: r.url };
+  });
+});
+
+// A soundtrack composed to the creator's choices: theme, mood, tempo, instruments, own words.
+router.post('/projects/:id/music', authenticateToken, requireVideoPlan, async (req, res) => {
+  const p = await loadProject(req.user.id, req.params.id);
+  if (!p) return fail(res, 404, 'Video not found');
+  const seconds = Math.max(30, Math.min(120, Math.ceil((p.render_seconds || p.target_seconds || 30) / 30) * 30));
+  const b = req.body || {};
+  const chosen = b.theme || b.mood || b.tempo || b.instruments || b.custom || b.style;
+  const style = chosen ? musicPrompt({ ...b, custom: b.custom || b.style }) : `${p.look_card?.style || 'cinematic'} instrumental soundtrack, ${p.logline || p.title}`;
+  const title = String(b.title || MUSIC_THEMES.find((t) => t.id === b.theme)?.label || 'Custom soundtrack').slice(0, 60);
+  return runCharged(req, res, { kind: 'music', action: 'song', projectId: p.id, costOpts: { seconds }, log: { feature: 'voice', provider: 'runware', model: 'ace-step' } }, async () => {
+    const r = await generateSong({ style, seconds, folder: 'bookofmemes/video-studio/music' });
+    const history = [...(p.music_history || []), { url: r.audioUrl, title, prompt: style, at: now() }].slice(-12);
+    let { data, error } = await supabase.from('video_projects').update({ music_url: r.audioUrl, music_title: title, music_history: history, updated_at: now() }).eq('id', p.id).select().single();
+    if (error && needs083(error)) ({ data, error } = await supabase.from('video_projects').update({ music_url: r.audioUrl, updated_at: now() }).eq('id', p.id).select().single());
+    if (error) throw error;
+    saveToGallery({ userId: req.user.id, kind: 'audio', url: r.audioUrl, feature: 'song', prompt: style, model: r.model, durationSeconds: r.seconds, projectKind: 'video', projectId: p.id, role: 'music', provider: 'runware', providerCost: r.cost });
+    return { data: { project: await view(data) }, providerCost: r.cost, durationSeconds: r.seconds, outputUrl: r.audioUrl };
+  });
+});
+
+// Old whole-video voice-over (one track from all the narration); kept for videos made before 083.
 router.post('/projects/:id/voiceover', authenticateToken, requireVideoPlan, async (req, res) => {
   const p = await loadProject(req.user.id, req.params.id);
   if (!p) return fail(res, 404, 'Video not found');
@@ -416,19 +611,6 @@ router.post('/projects/:id/voiceover', authenticateToken, requireVideoPlan, asyn
   });
 });
 
-router.post('/projects/:id/music', authenticateToken, requireVideoPlan, async (req, res) => {
-  const p = await loadProject(req.user.id, req.params.id);
-  if (!p) return fail(res, 404, 'Video not found');
-  const seconds = Math.max(30, Math.min(120, Math.ceil((p.target_seconds || 30) / 30) * 30));
-  const style = String(req.body?.style || '').trim().slice(0, 300) || `${p.look_card?.style || 'cinematic'} instrumental soundtrack, ${p.logline || p.title}`;
-  return runCharged(req, res, { kind: 'music', action: 'song', projectId: p.id, costOpts: { seconds }, log: { feature: 'voice', provider: 'runware', model: 'ace-step' } }, async () => {
-    const r = await generateSong({ style, seconds, folder: 'bookofmemes/video-studio/music' });
-    const { data } = await supabase.from('video_projects').update({ music_url: r.audioUrl, updated_at: now() }).eq('id', p.id).select().single();
-    saveToGallery({ userId: req.user.id, kind: 'audio', url: r.audioUrl, feature: 'song', prompt: style, model: r.model, durationSeconds: r.seconds, projectKind: 'video', projectId: p.id, role: 'music', provider: 'runware', providerCost: r.cost });
-    return { data: { project: await view(data) }, providerCost: r.cost, durationSeconds: r.seconds, outputUrl: r.audioUrl };
-  });
-});
-
 // ── 4. Render one MP4 ───────────────────────────────────────────────────────
 router.post('/projects/:id/render', authenticateToken, requireVideoPlan, async (req, res) => {
   const p = await loadProject(req.user.id, req.params.id);
@@ -440,12 +622,15 @@ router.post('/projects/:id/render', authenticateToken, requireVideoPlan, async (
     return fail(res, 409, `${shots.length - ready.length} shot(s) have no clip yet. Make them, leave them out, or render anyway.`, { code: 'shots_missing', missing: shots.length - ready.length });
   }
   return runCharged(req, res, { kind: 'render', action: 'videoRender', projectId: p.id, log: { feature: 'video', provider: 'cloudinary', model: 'splice' } }, async () => {
-    const voice = p.voiceover_url ? await ensureOnCloudinary(p.voiceover_url) : null;
+    // Per-shot voice lines replace the old single voice-over track when any exist.
+    const perShotVoice = ready.some((s) => s.voice_public_id);
+    const voiceover = !perShotVoice && p.voiceover_url ? await ensureOnCloudinary(p.voiceover_url) : null;
     const music = p.music_url ? await ensureOnCloudinary(p.music_url) : null;
-    const r = await renderVideo({ clips: ready.map((s) => ({ publicId: s.clip_public_id, trimStart: Number(s.trim_start) || 0, trimEnd: s.trim_end ? Number(s.trim_end) : null })), voiceover: voice, music });
+    const r = await renderFilm({ shots: ready, project: p, musicPublicId: music, voiceoverPublicId: voiceover });
+    await Promise.all(Object.entries(r.caches).map(([id, cache]) => supabase.from('video_shots').update({ edit_cache: cache }).eq('id', id).then(() => null, () => null)));
     const { data } = await supabase.from('video_projects').update({ render_url: r.url, render_seconds: r.seconds, status: 'rendered', updated_at: now() }).eq('id', p.id).select().single();
     saveToGallery({ userId: req.user.id, kind: 'video', url: r.url, feature: 'video', prompt: p.title, model: 'render', durationSeconds: r.seconds, projectKind: 'video', projectId: p.id, role: 'render', provider: 'cloudinary' });
-    return { data: { project: await view(data) }, outputUrl: r.url, durationSeconds: r.seconds };
+    return { data: { project: await view(data), timeline: r.timeline }, outputUrl: r.url, durationSeconds: r.seconds };
   });
 });
 
