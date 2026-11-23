@@ -387,7 +387,7 @@ const STAGE_RUN = {
 /** Runs one unit of work on an episode. Returns true when something happened. */
 export async function advanceEpisode(id) {
   const p = await load(id);
-  if (!p || p.mode !== 'auto' || p.pipeline?.status !== 'running') return false;
+  if (!p || p.engine !== 'auto' || p.pipeline?.status !== 'running') return false;
   p.pipeline ||= {};
   const stage = p.pipeline.stage || 'breakdown';
   if (stage === 'done') return false;
@@ -424,8 +424,8 @@ const busy = new Set();
 let timer = null;
 async function tick() {
   try {
-    const { data, error } = await supabase.from('video_projects').select('id').eq('mode', 'auto').eq('pipeline->>status', 'running').order('updated_at').limit(6);
-    if (error) { if (!/column|mode|PGRST/i.test(error.message)) console.error('[episode] tick:', error.message); return; }
+    const { data, error } = await supabase.from('video_projects').select('id').eq('engine', 'auto').eq('pipeline->>status', 'running').order('updated_at').limit(6);
+    if (error) { if (!/column|engine|PGRST/i.test(error.message)) console.error('[episode] tick:', error.message); return; }
     await Promise.all((data || []).filter((r) => !busy.has(r.id)).slice(0, 3).map(async (r) => {
       busy.add(r.id);
       try { await advanceEpisode(r.id); } finally { busy.delete(r.id); }

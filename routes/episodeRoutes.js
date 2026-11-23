@@ -52,7 +52,7 @@ async function requirePlan(req, res, next) {
 }
 async function loadEpisode(userId, id) {
   if (!UUID.test(String(id))) return null;
-  const { data } = await supabase.from('video_projects').select('*').eq('id', id).eq('user_id', userId).eq('mode', 'auto').maybeSingle();
+  const { data } = await supabase.from('video_projects').select('*').eq('id', id).eq('user_id', userId).eq('engine', 'auto').maybeSingle();
   return data;
 }
 
@@ -196,7 +196,7 @@ router.post('/', authenticateToken, requirePlan, async (req, res) => {
   const episodeNumber = series ? (series.episode_count || 0) + 1 : null;
 
   const { data: p, error } = await supabase.from('video_projects').insert({
-    user_id: req.user.id, mode: 'auto', series_id: series?.id || null, episode_number: episodeNumber,
+    user_id: req.user.id, engine: 'auto', series_id: series?.id || null, episode_number: episodeNumber,
     title: String(b.title || '').trim().slice(0, 120) || (series ? `${series.title} · Episode ${episodeNumber}` : 'New episode'),
     idea: script.slice(0, 2000), script, source_kind: 'script', target_seconds: format.seconds, clip_seconds: 5, model: AI_MODELS.VIDEO.PREMIUM,
     aspect, status: 'shooting', settings,
