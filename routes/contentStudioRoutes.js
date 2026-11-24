@@ -25,7 +25,16 @@ import { saveToGallery, isOurCloudinary } from '../utils/gallery.js';
 import { generateSong, SONG_SECONDS, MUSIC_MODEL } from '../utils/music.js';
 import { v2 as cloudinary } from 'cloudinary';
 import { narrateScript, speakableText, estimateSeconds, MAX_SCRIPT_CHARS } from '../utils/podcastNarration.js';
-import { validVoiceId } from '../config/soundStudio.js';
+import { validVoiceId, MUSIC_THEMES } from '../config/soundStudio.js';
+import { composeQuestionCard } from '../utils/questionCard.js';
+import { speakLine } from '../utils/soundMaker.js';
+import { ensureOnCloudinary } from '../utils/renderVideo.js';
+import fs from 'fs';
+
+// Free library soundtracks (scripts/buildSoundLibrary.js), offered as a question's background music.
+let SOUND_LIBRARY = { music: [] };
+try { SOUND_LIBRARY = JSON.parse(fs.readFileSync(new URL('../config/soundLibrary.json', import.meta.url), 'utf8')); } catch { /* optional */ }
+const CARD_TYPES = ['memes', 'puzzles', 'kids_collections'];
 import { searchText, ilikeAny } from '../utils/searchText.js';
 import {
   proposeConcepts, writeDraft, verifyPuzzle, draftToForm, publicTypes, ContentError, AGE_BANDS, PODCAST_MINUTES,
@@ -313,10 +322,11 @@ router.post('/projects/:id/song', authenticateToken, async (req, res) => {
   if (project.item_type !== 'music_box' || !project.draft?.lyrics) return fail(res, 400, 'Write the lyrics first');
   const seconds = SONG_SECONDS.includes(Number(req.body?.seconds)) ? Number(req.body.seconds) : 60;
   const instrumental = !!req.body?.instrumental;
+  const sourceAudio = HTTPS.test(String(req.body?.source_audio_url || '')) ? req.body.source_audio_url : null;
   const style = [project.draft.genre, project.draft.mood, String(req.body?.style || '').slice(0, 200)].filter(Boolean).join(', ') || 'catchy pop song';
   return runCharged(req, res, { kind: 'song', action: 'song', itemType: project.item_type, projectId: project.id, costOpts: { seconds }, log: { feature: 'voice', provider: 'runware', model: MUSIC_MODEL } }, async () => {
-    const r = await generateSong({ style, lyrics: instrumental ? null : project.draft.lyrics, seconds });
-    const media = { ...(project.media || {}), audio_url: r.audioUrl, audio_seconds: r.seconds };
+    const r = await generateSong({ style, lyrics: instrumental ? null : project.draft.lyrics, seconds, sourceAudioUrl: sourceAudio ? `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/video/upload/${await ensureOnCloudinary(sourceAudio, `bookofmemes/music/sources/${req.user.id}`)}.mp3` : null });
+    const media = { ...(project.media || {}), audio_url: r.audioUrl, audio_seconds: r.seconds, song_source_url: sourceAudio || null };
     const { data: updated, error } = await supabase.from('content_projects').update({ media, updated_at: now() }).eq('id', project.id).select().single();
     if (error) throw error;
     saveToGallery({ userId: req.user.id, kind: 'audio', url: r.audioUrl, feature: 'song', prompt: project.draft.title, model: r.model, durationSeconds: r.seconds, projectKind: 'content', projectId: project.id, role: 'song', provider: 'runware', providerCost: r.cost });
@@ -356,6 +366,76 @@ router.post('/projects/:id/meme-image', authenticateToken, async (req, res) => {
     console.error('[content] meme image failed:', err.message);
     fail(res, 500, 'Could not put the text on the picture. Please try again.');
   }
+});
+
+// ── Puzzle-type cards: the question written inside the picture (free) ───────
+// { image_url?: the background (AI-made, gallery or phone; default: the post's picture),
+//   text?: default the quiz question, style?: 'band' | 'outline' }
+router.post('/projects/:id/question-card', authenticateToken, async (req, res) => {
+  const project = await loadProject(req.user.id, req.params.id);
+  if (!project) return fail(res, 404, 'Post not found');
+  if (!CARD_TYPES.includes(project.item_type)) return fail(res, 400, 'Only memes, puzzles and kids posts have question pictures');
+  // Always write on the clean background, never on a picture that already has words.
+  const src = String(req.body?.image_url || project.media?.card_base_url || project.media?.image_url || '');
+  const text = String(req.body?.text ?? project.draft?.quiz?.question_text ?? '').trim();
+  if (!HTTPS.test(src)) return fail(res, 400, 'Make or choose the background picture first');
+  if (!text) return fail(res, 400, 'Write the question first');
+  try {
+    const card = await composeQuestionCard({ imageUrl: src, text, style: req.body?.style === 'outline' ? 'outline' : 'band' });
+    const media = { ...(project.media || {}), image_url: card.url, card_base_url: src, card_text: text, card_style: req.body?.style === 'outline' ? 'outline' : 'band' };
+    const { data: updated } = await supabase.from('content_projects').update({ media, updated_at: now() }).eq('id', project.id).select().single();
+    saveToGallery({ userId: req.user.id, kind: 'image', url: card.url, feature: 'image', prompt: text, source: 'ai', projectKind: 'content', projectId: project.id, role: 'question_card' });
+    res.json({ success: true, data: { project: projectView(updated), image_url: card.url } });
+  } catch (err) {
+    console.error('[content] question card failed:', err.message);
+    fail(res, err.status || 500, err.status ? err.message : 'Could not write the question on the picture. Please try again.');
+  }
+});
+
+// ── Sound for a question: plays when the question shows in the app ───────────
+// { kind: 'library', theme }            a free library soundtrack                 free
+// { kind: 'voice', voice_id, tone? }    a voice reads the question (custom too)   1 voice line
+// { kind: 'audio', url, label? }        the user's own: recorded, uploaded, gallery free
+// { kind: 'none' }                      no sound
+router.post('/projects/:id/question-sound', authenticateToken, async (req, res) => {
+  const project = await loadProject(req.user.id, req.params.id);
+  if (!project) return fail(res, 404, 'Post not found');
+  if (!CARD_TYPES.includes(project.item_type)) return fail(res, 400, 'Only memes, puzzles and kids posts have question sounds');
+  const kind = String(req.body?.kind || '');
+  const save = async (fields) => {
+    const media = { ...(project.media || {}) };
+    for (const k of ['audio_url', 'audio_seconds', 'audio_kind', 'audio_label']) delete media[k];
+    Object.assign(media, fields);
+    const { data } = await supabase.from('content_projects').update({ media, updated_at: now() }).eq('id', project.id).select().single();
+    return projectView(data);
+  };
+  if (kind === 'none') return res.json({ success: true, data: { project: await save({}) } });
+  if (kind === 'library') {
+    const t = MUSIC_THEMES.find((x) => x.id === req.body?.theme);
+    const track = t && SOUND_LIBRARY.music.find((m) => m.id === t.id);
+    if (!track) return fail(res, 400, 'Choose a music theme');
+    return res.json({ success: true, data: { project: await save({ audio_url: track.url, audio_seconds: track.seconds, audio_kind: 'music', audio_label: `${track.title} (free library)` }) } });
+  }
+  if (kind === 'audio') {
+    const url = String(req.body?.url || '');
+    if (!HTTPS.test(url)) return fail(res, 400, 'Record, upload or pick the audio first');
+    try {
+      const pid = await ensureOnCloudinary(url, `bookofmemes/quiz-sounds/${req.user.id}`);
+      const info = await cloudinary.api.resource(pid, { resource_type: 'video' }).catch(() => null);
+      return res.json({ success: true, data: { project: await save({ audio_url: info?.secure_url || url, audio_seconds: info?.duration ? Math.round(info.duration) : null, audio_kind: 'audio', audio_label: String(req.body?.label || 'My audio').slice(0, 60) }) } });
+    } catch (err) { console.error('[content] question audio:', err.message); return fail(res, 400, 'Could not use that audio. Try another one.'); }
+  }
+  if (kind === 'voice') {
+    const text = String(project.draft?.quiz?.question_text || '').trim();
+    if (!text) return fail(res, 400, 'Write the question first');
+    const voiceId = validVoiceId(req.body?.voice_id) ? req.body.voice_id : 'adrian';
+    return runCharged(req, res, { kind: 'question_voice', action: 'voiceLine', itemType: project.item_type, projectId: project.id, log: { feature: 'voice', provider: 'runware', model: 'fishaudio:s2.1@pro' } }, async () => {
+      const r = await speakLine(text, { voiceId, tone: req.body?.tone || 'natural', userId: req.user.id, folder: `bookofmemes/quiz-sounds/${req.user.id}` });
+      const view = await save({ audio_url: r.url, audio_seconds: Math.round(r.seconds), audio_kind: 'voice', audio_label: 'The question, read aloud' });
+      return { view: { project: view, audio_url: r.url }, providerCost: r.cost, durationSeconds: r.seconds };
+    });
+  }
+  return fail(res, 400, 'Choose a sound');
 });
 
 // Add Content posted it: remember which item it became.

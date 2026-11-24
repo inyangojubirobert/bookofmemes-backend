@@ -45,36 +45,64 @@ const WORDS_PER_MINUTE = 150;
 const KIDS_UNSAFE = /\b(kill|killed|blood|bloody|gun|guns|knife|stab|dead|death|die|dies|murder|sexy|sex|alcohol|beer|wine|drunk|drug|drugs|cigarette|smoke|smoking|weapon|bomb|scary|horror|hate)\b/i;
 
 const QUIZ_SHAPE = '"quiz": {"question": "a question about this post that viewers answer", "correct_answer": "short", "wrong_answers": ["short", "short", "short"], "explanation": "one sentence: why the answer is right"}';
+
+// ── Puzzle-type posts (memes, puzzles, kids): how they are SHOWN ─────────────
+// The app shows one picture with the question written INSIDE it (in the middle), and the
+// answer options as buttons below. Nothing else is displayed, so the engine writes only:
+// a short question that fits on a picture, short answers, and a picture description with a
+// calm middle for the words (Bascardo writes the words on it: AI pictures spell badly).
+export const QUIZ_CARD = {
+  memes: { questionWords: 14, answerWords: 5 },
+  puzzles: { questionWords: 22, answerWords: 5 },
+  kids_collections: { questionWords: 10, answerWords: 4 },
+};
+const countWords = (t) => (String(t || '').match(/\S+/g) || []).length;
+const cardShape = (itemType, questionWhat) => {
+  const c = QUIZ_CARD[itemType];
+  return `"quiz": {"question": "${questionWhat} AT MOST ${c.questionWords} WORDS: it is written inside the picture", "correct_answer": "at most ${c.answerWords} words", "wrong_answers": ["at most ${c.answerWords} words", "...", "..."], "explanation": "one short sentence: why the answer is right"}`;
+};
+const CARD_IMAGE_RULE = '"image_prompt": "the background picture for the question, under 70 words: subject, setting, style, colours. Keep the MIDDLE of the picture calm and simple (soft, uncluttered) because the question is written there. No words or letters in the picture."';
+/** The card rules, checked on every puzzle-type draft (a breach means a retry). */
+function cardProblem(itemType, q) {
+  const c = QUIZ_CARD[itemType];
+  const base = quizProblem(q);
+  if (base) return base;
+  if (countWords(q.question_text) > c.questionWords) return `question has ${countWords(q.question_text)} words; it must fit on the picture (at most ${c.questionWords})`;
+  if ([q.correct_answer, ...q.wrong_answers].some((a) => countWords(a) > c.answerWords)) return `an answer is longer than ${c.answerWords} words`;
+  if (q.wrong_answers.length < 3) return 'needs 3 wrong answers';
+  return null;
+}
 const IMAGE_RULE = '"image_prompt": "a detailed picture description for an AI image generator: subject, setting, style, colours, framing, under 80 words. No words or letters in the picture (AI images spell badly)."';
 
 // ── One entry per item type: what a concept and a finished draft look like ──
 // draftAction is the credit action in config/aiPlans.js; maxTokens bounds the
 // answer (and so the worst-case cost those credits are priced on).
 export const CONTENT_TYPES = {
+  // Puzzle-type cards (see QUIZ_CARD): a short question written on the picture + answer buttons.
   memes: {
-    label: 'Meme', draftAction: 'contentDraft', maxTokens: 1100, media: ['image'], quiz: true,
-    brief: 'a meme post: one funny, relatable picture with a short caption. Humour that punches up, never at a group of people.',
-    conceptHint: 'three different jokes or angles on the idea (e.g. relatable struggle, absurd twist, wordplay)',
-    draftShape: `"title": "short catchy title", "caption": "the meme text, under 20 words (top/bottom text style or one line)", "description": "1-2 sentences for the post", ${IMAGE_RULE}, ${QUIZ_SHAPE}`,
-    check: (d) => (!d.title || !d.caption || !d.image_prompt ? 'missing title/caption/image_prompt' : quizProblem(d.quiz)),
-    toForm: (d) => ({ values: { title: d.title, description: [d.caption, d.description].filter(Boolean).join('\n\n') }, quiz: d.quiz, imageFields: ['question_image'] }), // the picture belongs to the question, never the title's cover
+    label: 'Meme', draftAction: 'contentDraft', maxTokens: 700, media: ['image'], quiz: true, card: true,
+    brief: 'a meme quiz card: one funny, relatable picture with a short, witty question written on it, and answer buttons below (one right, three funny wrong ones). Humour that punches up, never at a group of people.',
+    conceptHint: 'three different jokes or angles on the idea (e.g. relatable struggle, absurd twist, wordplay), each as a question with funny answers',
+    draftShape: `"title": "short catchy title", ${CARD_IMAGE_RULE}, ${cardShape('memes', 'the funny question,')}`,
+    check: (d) => (!d.title || !d.image_prompt ? 'missing title/image_prompt' : cardProblem('memes', d.quiz)),
+    toForm: (d) => ({ values: { title: d.title, description: d.quiz?.explanation || '' }, quiz: d.quiz, imageFields: ['question_image'] }), // the picture belongs to the question, never the title's cover
   },
   puzzles: {
-    label: 'Puzzle', draftAction: 'contentDraftVerified', maxTokens: 1300, media: ['image'], quiz: true, verify: true,
-    brief: 'a puzzle post: a riddle, logic puzzle, word puzzle, number puzzle or brain teaser that has exactly one clear, fair answer.',
-    conceptHint: 'three different kinds of puzzle on the idea, from easier to harder',
-    draftShape: `"title": "short title", "difficulty": "easy | medium | hard", "puzzle": "the full puzzle as the viewer reads it, with everything needed to solve it", "hint": "one gentle hint", ${IMAGE_RULE}, ${QUIZ_SHAPE.replace('a question about this post that viewers answer', 'the puzzle question in one line')}`,
-    check: (d) => (!d.title || !d.puzzle ? 'missing title/puzzle' : quizProblem(d.quiz)),
-    toForm: (d) => ({ values: { title: d.title, description: [d.puzzle, d.hint && `Hint: ${d.hint}`].filter(Boolean).join('\n\n') }, quiz: d.quiz, imageFields: ['question_image'] }),
+    label: 'Puzzle', draftAction: 'contentDraftVerified', maxTokens: 800, media: ['image'], quiz: true, verify: true, card: true,
+    brief: 'a puzzle card: a short riddle, logic, word, number or picture puzzle that fits on a picture, with exactly one clear, fair answer among four answer buttons.',
+    conceptHint: 'three different kinds of short puzzle on the idea, from easier to harder',
+    draftShape: `"title": "short title", "difficulty": "easy | medium | hard", "hint": "a gentle hint, at most 10 words", ${CARD_IMAGE_RULE}, ${cardShape('puzzles', 'the whole puzzle, complete and solvable on its own,')}`,
+    check: (d) => (!d.title ? 'missing title' : cardProblem('puzzles', d.quiz)),
+    toForm: (d) => ({ values: { title: d.title, description: d.hint ? `Hint: ${d.hint}` : '' }, quiz: d.quiz, imageFields: ['question_image'] }),
   },
   kids_collections: {
-    label: 'For Kids', draftAction: 'contentDraft', maxTokens: 1500, media: ['image'], quiz: true,
-    brief: 'a post for children aged 4-10: a short story, fun fact, counting or learning activity. Simple words, warm and safe, nothing scary or violent.',
-    briefFor: (st) => `a post for ${AGE_BANDS[st.age_band] || AGE_BANDS['6-8']}: a short story, fun fact, counting or learning activity. Warm and safe, nothing scary, violent or unkind.`,
-    conceptHint: 'three different kid-friendly takes (e.g. tiny story, learning activity, fun fact)',
-    draftShape: `"title": "short title", "age_range": "e.g. 4-6", "text": "the content, 80-200 words in simple sentences", "lesson": "what the child learns, one line", ${IMAGE_RULE.replace('AI image generator:', 'AI image generator, bright and friendly for children:')}, ${QUIZ_SHAPE.replace('a question about this post that viewers answer', 'a simple question a child can answer by looking at the picture or the text')}`,
-    check: (d) => (!d.title || !d.text ? 'missing title/text' : KIDS_UNSAFE.test(`${d.title} ${d.text} ${d.image_prompt || ''} ${JSON.stringify(d.quiz || {})}`) ? 'unsuitable word for children' : quizProblem(d.quiz)),
-    toForm: (d) => ({ values: { title: d.title, description: [d.text, d.lesson && `What we learn: ${d.lesson}`].filter(Boolean).join('\n\n') }, quiz: d.quiz, imageFields: ['question_image'] }), // the picture belongs to the question, never the title's cover
+    label: 'For Kids', draftAction: 'contentDraft', maxTokens: 700, media: ['image'], quiz: true, card: true,
+    brief: 'a quiz card for children aged 4-10: a bright picture with a very short, simple question written on it, and answer buttons below. Warm and safe, nothing scary or violent.',
+    briefFor: (st) => `a quiz card for ${AGE_BANDS[st.age_band] || AGE_BANDS['6-8']}: a bright picture with a very short, simple question written on it, and answer buttons below. Warm and safe, nothing scary, violent or unkind.`,
+    conceptHint: 'three different kid-friendly questions (e.g. counting, colours, animals, a fun fact)',
+    draftShape: `"title": "short title", "age_range": "e.g. 4-6", "lesson": "what the child learns, at most 10 words", ${CARD_IMAGE_RULE.replace('the background picture for the question,', 'the background picture for the question, bright and friendly for children,')}, ${cardShape('kids_collections', 'a simple question a child can answer from the picture,')}`,
+    check: (d) => (!d.title ? 'missing title' : KIDS_UNSAFE.test(`${d.title} ${d.lesson || ''} ${d.image_prompt || ''} ${JSON.stringify(d.quiz || {})}`) ? 'unsuitable word for children' : cardProblem('kids_collections', d.quiz)),
+    toForm: (d) => ({ values: { title: d.title, description: d.lesson ? `What we learn: ${d.lesson}` : '' }, quiz: d.quiz, imageFields: ['question_image'] }), // the picture belongs to the question, never the title's cover
   },
   music_box: {
     label: 'Music', draftAction: 'contentDraft', maxTokens: 1800, media: ['image', 'audio'], quiz: false,
@@ -220,7 +248,7 @@ export async function verifyPuzzle(draft) {
   const options = [q.correct_answer, ...(q.wrong_answers || [])].filter(Boolean).sort(() => Math.random() - 0.5);
   const text = `Solve this puzzle carefully. Do not guess.
 <source>
-${clean(draft.puzzle || '').slice(0, 3000)}
+${clean(draft.puzzle || draft.quiz?.question_text || '').slice(0, 3000)}
 ${draft.hint ? `Hint: ${clean(draft.hint).slice(0, 300)}` : ''}
 Question: ${clean(q.question_text || '').slice(0, 300)}
 Options: ${options.map((o) => `"${clean(o)}"`).join(', ')}
@@ -244,6 +272,7 @@ export function draftToForm(itemType, draft) {
     quiz: t.quiz && form.quiz ? { question_text: form.quiz.question_text, question_image: '', correct_answer: form.quiz.correct_answer, wrong_answers: form.quiz.wrong_answers } : null,
     image_prompt: draft.image_prompt || draft.cover_prompt || draft.thumbnail_prompt || null,
     image_fields: form.imageFields || [],
+    card: !!t.card, // puzzle-type: the question is written on the picture (QUIZ_CARD)
     video_prompt: draft.video_prompt || null,
     video_field: form.videoField || null,
     audio_field: form.audioField || null,
@@ -251,5 +280,5 @@ export function draftToForm(itemType, draft) {
 }
 
 export function publicTypes() {
-  return Object.fromEntries(Object.entries(CONTENT_TYPES).map(([k, t]) => [k, { label: t.label, media: t.media, quiz: t.quiz, draft_action: t.draftAction }]));
+  return Object.fromEntries(Object.entries(CONTENT_TYPES).map(([k, t]) => [k, { label: t.label, media: t.media, quiz: t.quiz, card: !!t.card, card_limits: QUIZ_CARD[k] || null, draft_action: t.draftAction }]));
 }

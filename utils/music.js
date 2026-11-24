@@ -20,15 +20,22 @@ async function call(tasks) {
   return j.data || [];
 }
 
-/** Makes a song (lyrics) or an instrumental (no lyrics). Returns { audioUrl, seconds, cost, model }. */
-export async function generateSong({ style, lyrics = null, seconds = 60, folder = 'bookofmemes/music' }) {
+/**
+ * Makes a song (lyrics) or an instrumental (no lyrics). Returns { audioUrl, seconds, cost, model }.
+ * sourceAudioUrl: the user's own audio (a beat, a melody, a voice): ACE-Step's audio mode builds the
+ * song on it (checked live 2026-11-24: a beat + lyrics → a sung song over that beat, $0.00225, 6 s).
+ * With source audio the model takes no duration; the repaint region sets how long it runs.
+ */
+export async function generateSong({ style, lyrics = null, seconds = 60, sourceAudioUrl = null, folder = 'bookofmemes/music' }) {
   if (!KEY()) throw Object.assign(new Error('Music is not available yet'), { status: 501 });
   const duration = SONG_SECONDS.includes(Number(seconds)) ? Number(seconds) : 60;
   const taskUUID = crypto.randomUUID();
   await call([{
     taskType: 'audioInference', taskUUID, model: MODEL, outputFormat: 'MP3', deliveryMethod: 'async', includeCost: true,
-    positivePrompt: String(style || 'warm, catchy pop song').slice(0, 1000), duration,
-    settings: { lyrics: lyrics ? String(lyrics).slice(0, 3500) : '[Instrumental]' },
+    positivePrompt: String(style || 'warm, catchy pop song').slice(0, 1000),
+    ...(sourceAudioUrl
+      ? { inputs: { audio: sourceAudioUrl }, settings: { lyrics: lyrics ? String(lyrics).slice(0, 3000) : '[Instrumental]', repaintingStart: 0, repaintingEnd: duration } }
+      : { duration, settings: { lyrics: lyrics ? String(lyrics).slice(0, 3500) : '[Instrumental]' } }),
   }]);
   const until = Date.now() + 150000;
   while (Date.now() < until) {
