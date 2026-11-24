@@ -6,7 +6,7 @@ import { isOurCloudinary } from './gallery.js';
 
 cloudinary.config({ cloud_name: process.env.CLOUDINARY_CLOUD_NAME, api_key: process.env.CLOUDINARY_API_KEY, api_secret: process.env.CLOUDINARY_API_SECRET });
 
-export const CARD_SIZE = 1080; // square, like the quiz picture frame
+export const CARD_SIZE = 1080; // card width; the height follows the picture (the app fits any shape)
 
 /** Font size that keeps a question of this length inside the picture. */
 export const cardFontSize = (text) => {
@@ -36,7 +36,8 @@ export async function composeQuestionCard({ imageUrl, text, style = 'band', fold
     ? { overlay: { font_family: 'Arial', font_size: size, font_weight: 'bold', stroke: 'stroke', text_align: 'center', text: words }, color: 'white', border: '5px_solid_black', width: 920, crop: 'fit' }
     : { overlay: { font_family: 'Arial', font_size: size, font_weight: 'bold', text_align: 'center', text: words }, color: 'white', background: 'rgb:00000099', width: 920, crop: 'fit' };
   const transformation = [
-    { width: CARD_SIZE, height: CARD_SIZE, crop: 'fill', gravity: 'auto' },
+    // The whole picture, never cropped: scaled to the card width and kept in its own shape.
+    { width: CARD_SIZE, crop: 'scale' },
     textLayer,
     { flags: 'layer_apply', gravity: 'center' },
   ];
