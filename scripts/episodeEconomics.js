@@ -33,4 +33,4 @@ for (const seconds of [30, 60, 180]) {
     row(`Model 2: ${vm}`, e.total, cost);
   }
 }
-console.log('\nPlans: Pro 200 credits/month, Business 750/month; earnings are after Google\'s 15%.');
+console.log('\nPlans: Pro 500 credits/month, Business 1500/month; earnings are after Google\'s 15%.');

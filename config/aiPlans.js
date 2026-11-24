@@ -3,8 +3,10 @@
 // action costs credits in proportion to what it really costs us.
 //
 //   Free      10 credits a month     $0
-//   Pro      200 credits a month     $9   (Google keeps 15%: we receive $7.65)
-//   Business 750 credits a month     $20  (we receive $17.00)
+//   Pro      500 credits a month     $9   (Google keeps 15%: we receive $7.65)  4 video clips
+//   Business 1500 credits a month    $20  (we receive $17.00)  12 video clips
+//   (2026-11-24: raised from 200 / 750 so the plans buy a useful number of clips; clip price kept at 125.
+//   Checked with scripts/aiPlanEconomics.js: both still carry 32 free users each in the worst case.)
 //
 // A credit is worth exactly what One Dream's is: one AI chat on Claude Haiku
 // with a short answer (≤650 tokens) and a short history, at most ~$0.0065.
@@ -40,7 +42,7 @@ export const AI_PLANS = {
     id: 'pro',
     name: 'Pro',
     priceUsd: 9,
-    monthlyCredits: 200,
+    monthlyCredits: 500,
     correctionsPerDay: 20,
     googlePlayProductId: process.env.GOOGLE_PLAY_AI_PRO_PRODUCT_ID || 'bom_ai_pro_monthly',
     premiumModels: true, // flagship models, no watermark
@@ -49,7 +51,7 @@ export const AI_PLANS = {
     id: 'business',
     name: 'Business',
     priceUsd: 20,
-    monthlyCredits: 750,
+    monthlyCredits: 1500,
     correctionsPerDay: 40,
     googlePlayProductId: process.env.GOOGLE_PLAY_AI_BUSINESS_PRODUCT_ID || 'bom_ai_business_monthly',
     premiumModels: true,
