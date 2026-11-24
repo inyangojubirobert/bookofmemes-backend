@@ -188,11 +188,12 @@ router.get('/config', authenticateToken, async (req, res) => {
       lengths: LENGTHS.map((s) => { const b = shotBudget(s); return { seconds: s, shots: b.shots, clip_credits: clip, total_clip_credits: b.shots * clip }; }),
       costs: {
         plan: creditsFor('videoPlan', { premium }), plan_with_reference: creditsFor('videoPlanWithReference', { premium }),
-        clip, clip_with_start_picture: creditsFor('video', { premium: true, reference: true }),
+        clip, clip_with_start_picture: creditsFor('video', { premium: true, reference: true }), draft: creditsFor('videoDraft', { premium: true }),
         render: creditsFor('videoRender', { premium }), narration_per_minute: creditsFor('narration', { premium, seconds: 60 }),
         music_per_minute: creditsFor('song', { premium, seconds: 60 }),
       },
       credits: { remaining: status.remaining, limit: status.limit, topup: status.topup || 0, plan: status.plan.name },
+      clip_resolution: status.plan.creator ? '720p' : '480p', // Creator plans make 720p clips
     } });
   } catch (err) { console.error('[video] config:', err.message); fail(res, 500, 'Could not load Video Studio'); }
 });
@@ -489,7 +490,10 @@ router.post('/projects/:id/shots/:sid/generate', authenticateToken, requireVideo
   const a = promptFor(p, shot, hasSlots(shot.cast_slots) ? await loadAssets(req.user.id) : {});
   const prompt = a.prompt;
   const referenceImages = !withStart && a.references.length ? a.references : null;
-  const cost = creditsFor('video', { premium: true, reference: withStart || !!referenceImages });
+  // draft: a cheap test clip (LTX, 25 credits; start picture yes, cast references no). Otherwise the
+  // full clip: 720p on Creator plans, 480p on Pro and Business.
+  const draft = !!req.body?.draft;
+  const cost = draft ? creditsFor('videoDraft', { premium: true }) : creditsFor('video', { premium: true, reference: withStart || !!referenceImages });
   const reservation = status.remaining >= cost ? await reserveCredits(req.user.id, status.plan, cost, `shot:${requestId}`, 30) : null;
   if (!reservation) {
     return fail(res, 402, outOfCreditsMessage(status, cost), { code: 'out_of_credits', credits: { remaining: status.remaining, cost } });
@@ -497,7 +501,7 @@ router.post('/projects/:id/shots/:sid/generate', authenticateToken, requireVideo
   try {
     const { job, existed } = await createJob({
       userId: req.user.id, requestId: `shot:${requestId}`, kind: 'video_clip',
-      input: { prompt, hd: false, premium: true, referenceImageUrl: shot.start_image_url || null, referenceImages, tier: status.plan.id, role: 'shot', shot_id: shot.id },
+      input: { prompt, hd: false, premium: true, referenceImageUrl: shot.start_image_url || null, referenceImages: draft ? null : referenceImages, tier: status.plan.id, role: 'shot', shot_id: shot.id, draft, hi: !draft && !!status.plan.creator },
       projectKind: 'video', projectId: p.id, reservation, credits: cost,
     });
     if (existed) await releaseCredits(reservation);

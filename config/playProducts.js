@@ -47,7 +47,9 @@ export const PLAY_PACKAGE_NAME =
 // AI credit packs (migration 089): one consumable Google Play product each, the same price as
 // config/aiPlans.js TOPUP_PACKS. Create them in Play Console → Monetize → In-app products.
 export const PLAY_AI_TOPUP_PRODUCTS = [
-  { productId: 'bascardo_ai_credits_60',  price: 3,  title: '60 Bascardo AI credits',  description: '60 Bascardo AI credits. They never expire and are used after your monthly credits.' },
-  { productId: 'bascardo_ai_credits_150', price: 7,  title: '150 Bascardo AI credits', description: '150 Bascardo AI credits (1 AI video clip). They never expire and are used after your monthly credits.' },
-  { productId: 'bascardo_ai_credits_400', price: 19, title: '400 Bascardo AI credits', description: '400 Bascardo AI credits (3 AI video clips). They never expire and are used after your monthly credits.' },
+  { productId: 'bascardo_ai_credits_60', price: 3, title: '60 Bascardo AI credits', description: '60 Bascardo AI credits (2 draft clips). They never expire and are used after your monthly credits.' },
+  { productId: 'bascardo_ai_credits_150', price: 5, title: '150 Bascardo AI credits', description: '150 Bascardo AI credits (1 AI video clip). They never expire and are used after your monthly credits.' },
+  { productId: 'bascardo_ai_credits_625', price: 12, title: '625 Bascardo AI credits', description: '625 Bascardo AI credits (5 AI video clips). They never expire and are used after your monthly credits.' },
+  { productId: 'bascardo_ai_credits_1500', price: 27, title: '1,500 Bascardo AI credits', description: '1,500 Bascardo AI credits (12 AI video clips). They never expire and are used after your monthly credits.' },
+  { productId: 'bascardo_ai_credits_3750', price: 60, title: '3,750 Bascardo AI credits', description: '3,750 Bascardo AI credits (30 AI video clips). They never expire and are used after your monthly credits.' },
 ];

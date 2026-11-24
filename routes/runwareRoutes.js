@@ -123,8 +123,24 @@ async function generateImage(prompt, { hd, premium, referenceImageUrl }) {
   };
 }
 
-function buildVideoTask(prompt, { hd, premium, referenceImageUrl, referenceImages = null }) {
-  const useHdModel = hd || premium;
+// hi: 720p on the premium model (Bascardo AI Creator plans, 2026-11-24) — unlike hd it never
+// touches the wallet. draft: a cheap LTX 2.3 fast clip (480p class) to test an idea; drafts send
+// a start picture but not cast references (LTX doesn't take them).
+function buildVideoTask(prompt, { hd, premium, referenceImageUrl, referenceImages = null, hi = false, draft = false }) {
+  if (draft) {
+    const t = {
+      taskType: 'videoInference', taskUUID: crypto.randomUUID(), positivePrompt: prompt, model: AI_MODELS.VIDEO.DRAFT,
+      width: 768, height: 448, duration: VIDEO_FREE_DURATION_SECONDS, numberResults: 1, deliveryMethod: 'async', includeCost: true,
+    };
+    if (referenceImageUrl) {
+      t.inputs = { frameImages: [{ image: referenceImageUrl, frame: 'first' }] };
+      delete t.width; delete t.height;
+      t.resolution = '480p';
+    }
+    return t;
+  }
+  const useHdModel = hd || premium || hi;
+  hd = hd || hi; // the same 1280x720 / '720p' sizes below
   const task = {
     taskType: 'videoInference',
     taskUUID: crypto.randomUUID(),
@@ -183,8 +199,8 @@ async function pollForResult(taskUUID, { intervalMs = 3000, timeoutMs = 120000 }
   throw new Error('Video generation timed out. Please try again.');
 }
 
-async function generateVideo(prompt, { hd, premium, referenceImageUrl }) {
-  const task = buildVideoTask(prompt, { hd, premium, referenceImageUrl });
+async function generateVideo(prompt, { hd, premium, referenceImageUrl, hi = false }) {
+  const task = buildVideoTask(prompt, { hd, premium, referenceImageUrl, hi });
   const startedAt = Date.now();
   const { data: queuedData, status: submitStatus } = await callRunwareTasks([task]);
   const [queued] = queuedData;
@@ -417,7 +433,7 @@ const status = await creditStatus(userId);
       const projectId = /^[0-9a-f-]{36}$/i.test(String(req.body?.project_id || '')) ? req.body.project_id : null;
       const { job, existed } = await createJob({
         userId, kind: 'video_clip', requestId: /^[A-Za-z0-9_-]{8,80}$/.test(rid) ? `video:${rid}` : `video:${crypto.randomUUID()}`,
-        input: { prompt: prompt.trim(), hd, premium, referenceImageUrl, tier: status.plan.id, role: req.body?.role || null },
+        input: { prompt: prompt.trim(), hd, premium, referenceImageUrl, tier: status.plan.id, role: req.body?.role || null, hi: !hd && !!status.plan.creator },
         projectKind, projectId, reservation: hd ? null : reservation, credits: hd ? 0 : cost,
         memory: hd ? { authorization: req.headers.authorization, hdCost } : null,
       });
@@ -430,7 +446,7 @@ const status = await creditStatus(userId);
       return res.status(202).json({ success: true, data: { job: publicJob(settled), pending: true, message: 'Still making your video. It will be in your Gallery when it is ready.' } });
     }
 
-    const { videoUrl: rawVideoUrl, taskUUID, modelUsed, latencyMs, providerCost, providerHttpStatus } = await generateVideo(prompt.trim(), { hd, premium, referenceImageUrl });
+    const { videoUrl: rawVideoUrl, taskUUID, modelUsed, latencyMs, providerCost, providerHttpStatus } = await generateVideo(prompt.trim(), { hd, premium, referenceImageUrl, hi: !hd && !!status.plan.creator });
     const skipWatermark = hd || premium; // Premium's plan perk: no watermark even on the free monthly allowance
     const videoUrl = skipWatermark ? rawVideoUrl : await watermarkVideo(rawVideoUrl);
     let charged = false;
@@ -457,8 +473,8 @@ const status = await creditStatus(userId);
 registerJobKind('video_clip', {
   pollEveryMs: 5000,
   async start(job) {
-    const { prompt, hd, premium, referenceImageUrl, referenceImages } = job.input;
-    const task = buildVideoTask(prompt, { hd, premium, referenceImageUrl, referenceImages });
+    const { prompt, hd, premium, referenceImageUrl, referenceImages, hi, draft } = job.input;
+    const task = buildVideoTask(prompt, { hd, premium, referenceImageUrl, referenceImages, hi, draft });
     // Keep our own task id: polling resumes with it after a restart.
     await callRunwareTasks([{ ...task, taskUUID: job.provider_task_id || task.taskUUID }]);
     return { provider: 'runware', providerTaskId: task.taskUUID, model: task.model };
@@ -471,10 +487,10 @@ registerJobKind('video_clip', {
     return null;
   },
   async finish(job, r, ctx) {
-    const { prompt, hd, premium, referenceImageUrl, tier, role } = job.input;
+    const { prompt, hd, premium, referenceImageUrl, tier, role, hi, draft } = job.input;
     if (!r?.videoURL) throw Object.assign(new Error('Runware returned no video'), { permanent: true });
-    const model = hd || premium ? AI_MODELS.VIDEO.PREMIUM : AI_MODELS.VIDEO.FREE;
-    const videoUrl = hd || premium ? r.videoURL : await watermarkVideo(r.videoURL);
+    const model = draft ? AI_MODELS.VIDEO.DRAFT : hd || premium || hi ? AI_MODELS.VIDEO.PREMIUM : AI_MODELS.VIDEO.FREE;
+    const videoUrl = hd || premium || hi || draft ? r.videoURL : await watermarkVideo(r.videoURL);
     let charged = false;
     if (hd) {
       // Wallet charge needs the user's session, kept only in memory. After a
@@ -484,7 +500,7 @@ registerJobKind('video_clip', {
       if (!charged) console.warn(`[jobs] HD video ${job.id} delivered without a wallet charge`);
     }
     const latencyMs = Date.now() - new Date(job.created_at).getTime();
-    logGeneration({ userId: job.user_id, feature: 'video', model, provider: 'runware', requestId: job.provider_task_id, inputPrompt: prompt, durationSeconds: VIDEO_FREE_DURATION_SECONDS, tier: hd ? 'hd' : (premium ? 'premium_free' : tier || 'free'), costTokens: charged ? creditsToLogUnits(ctx.hdCost) : 0, success: true, outputUrl: videoUrl, latencyMs, providerCost: r.cost ?? null });
+    logGeneration({ userId: job.user_id, feature: 'video', model, provider: 'runware', requestId: job.provider_task_id, inputPrompt: prompt, durationSeconds: VIDEO_FREE_DURATION_SECONDS, tier: draft ? 'draft' : hi ? '720p' : hd ? 'hd' : (premium ? 'premium_free' : tier || 'free'), costTokens: charged ? creditsToLogUnits(ctx.hdCost) : 0, success: true, outputUrl: videoUrl, latencyMs, providerCost: r.cost ?? null });
     saveToGallery({
       userId: job.user_id, kind: 'video', url: videoUrl, feature: 'video', prompt, model, durationSeconds: VIDEO_FREE_DURATION_SECONDS,
       projectKind: job.project_kind, projectId: job.project_id, role: role || null, provider: 'runware', providerCost: r.cost ?? null, credits: job.credits, jobId: job.id,
@@ -494,7 +510,7 @@ registerJobKind('video_clip', {
   },
   failed(job, err) {
     shotClipFailed(job).catch(() => {});
-    logGeneration({ userId: job.user_id, feature: 'video', model: job.input?.hd || job.input?.premium ? AI_MODELS.VIDEO.PREMIUM : AI_MODELS.VIDEO.FREE, provider: 'runware', inputPrompt: job.input?.prompt, tier: job.input?.hd ? 'hd' : 'free', success: false, errorMessage: err.message, latencyMs: Date.now() - new Date(job.created_at).getTime() });
+    logGeneration({ userId: job.user_id, feature: 'video', model: job.input?.draft ? AI_MODELS.VIDEO.DRAFT : job.input?.hd || job.input?.premium ? AI_MODELS.VIDEO.PREMIUM : AI_MODELS.VIDEO.FREE, provider: 'runware', inputPrompt: job.input?.prompt, tier: job.input?.hd ? 'hd' : 'free', success: false, errorMessage: err.message, latencyMs: Date.now() - new Date(job.created_at).getTime() });
   },
 });
 

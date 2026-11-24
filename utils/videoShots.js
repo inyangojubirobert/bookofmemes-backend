@@ -16,7 +16,7 @@ export async function shotClipReady(job, videoUrl) {
   try {
     const { data: s, error } = await supabase.from('video_shots').select('clip_history').eq('id', shotId).single();
     if (!error) {
-      const entry = { url: videoUrl, public_id: publicId, prompt: job.input?.prompt || null, references: job.input?.referenceImages || (job.input?.referenceImageUrl ? [job.input.referenceImageUrl] : []), credits: job.credits, model: job.input?.premium ? 'premium' : 'fast', job_id: job.id, at };
+      const entry = { url: videoUrl, public_id: publicId, prompt: job.input?.prompt || null, references: job.input?.referenceImages || (job.input?.referenceImageUrl ? [job.input.referenceImageUrl] : []), credits: job.credits, model: job.input?.draft ? 'draft' : job.input?.premium ? 'premium' : 'fast', resolution: job.input?.draft ? '480p' : job.input?.hi ? '720p' : '480p', draft: !!job.input?.draft, job_id: job.id, at };
       await supabase.from('video_shots').update({ clip_history: [...(s.clip_history || []), entry].slice(-20) }).eq('id', shotId);
     }
   } catch (err) { console.warn('[video] clip history:', err.message); }

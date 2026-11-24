@@ -61,6 +61,8 @@ export const AI_MODELS = {
     // same vendor family, verified live via Runware's modelSearch API.
     FREE: pick('RUNWARE_VIDEO_FREE_MODEL', 'bytedance:seedance@2.0-fast'),
     PREMIUM: pick('RUNWARE_VIDEO_HD_MODEL', 'bytedance:seedance@2.0'),
+    // Draft clips (2026-11-24): measured $0.15 for 5 s at 768x448, takes a start picture (frameImages + resolution).
+    DRAFT: pick('RUNWARE_VIDEO_DRAFT_MODEL', 'lightricks:ltx@2.3-fast'),
   },
   VOICE: {
     // 2026-11-20, measured on Runware: Gemini 3.1 Flash TTS cost $0.034-0.061 a

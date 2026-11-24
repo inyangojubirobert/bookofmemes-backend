@@ -397,7 +397,7 @@ const STAGE_RUN = {
       try {
         const { job } = await createJob({
           userId: p.user_id, requestId: `epclip:${shot.id}:${(shot.qc?.tries || 0)}`, kind: 'video_clip',
-          input: { prompt: shot.compiled?.prompt?.slice(0, 1000) || shot.visual, hd: false, premium: true, referenceImageUrl: shot.still_url, referenceImages: null, tier: status.plan.id, role: 'shot', shot_id: shot.id },
+          input: { prompt: shot.compiled?.prompt?.slice(0, 1000) || shot.visual, hd: false, premium: true, referenceImageUrl: shot.still_url, referenceImages: null, tier: status.plan.id, role: 'shot', shot_id: shot.id, hi: !!status.plan.creator },
           projectKind: 'video', projectId: p.id, reservation, credits: cost,
         });
         await supabase.from('video_shots').update({ status: 'generating', job_id: job.id, updated_at: now() }).eq('id', shot.id);

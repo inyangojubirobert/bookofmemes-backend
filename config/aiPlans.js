@@ -110,6 +110,7 @@ export const ACTION_COSTS = {
   videoPlan: { fast: 5, premium: 5 },         // storyline -> shot list fitted to the chosen length + its sound & light plan (083)
   videoPlanWithReference: { fast: 6, premium: 6 }, // ... plus reading 3 frames of a reference video
   videoRender: { fast: 2, premium: 2 },       // join the clips + voice-over/music into one MP4
+  videoDraft: { fast: 25, premium: 25 },      // a quick draft clip (LTX 2.3 fast, 480p) to test an idea before the 125-credit clip
   // Music (ACE-Step 1.5 XL turbo on Runware)
   songPerMinute: { fast: 1, premium: 1 },     // a song or instrumental, per started minute
   // Video Studio finishing (config/soundStudio.js, migration 083)
@@ -182,6 +183,7 @@ export const ACTION_COST_USD = {
   videoPlan: { fast: 0.0280, premium: 0.0280 },
   videoPlanWithReference: { fast: 0.0328, premium: 0.0328 },
   videoRender: { fast: 0.0100, premium: 0.0100 },
+  videoDraft: { fast: 0.15, premium: 0.15 },  // LTX 2.3 fast 5 s, measured 2026-11-24 (text or start picture)
   songPerMinute: { fast: 0.0023, premium: 0.0023 },
   backgroundRemoval: { fast: 0.01, premium: 0.01 },
   sfxPerSecond: { fast: 0.01, premium: 0.01 },
@@ -203,9 +205,13 @@ export const ACTION_COST_USD = {
 // better deal, and far above our worst cost per credit even after Google's cut
 // of the wallet purchase. scripts/aiPlanEconomics.js checks both.
 export const TOPUP_PACKS = {
-  ai_topup_60: { id: 'ai_topup_60', credits: 60, priceUsd: 3, googlePlayProductId: 'bascardo_ai_credits_60' },     // $0.050 a credit
-  ai_topup_150: { id: 'ai_topup_150', credits: 150, priceUsd: 7, googlePlayProductId: 'bascardo_ai_credits_150' },  // $0.047
-  ai_topup_400: { id: 'ai_topup_400', credits: 400, priceUsd: 19, googlePlayProductId: 'bascardo_ai_credits_400' }, // $0.0475
+  // Clip-sized packs (2026-11-24). Each costs more per credit than the plan of about the same
+  // size (625 vs Pro, 1,500 vs Business, 3,750 vs Creator Artist), so a plan stays the better deal.
+  ai_topup_60: { id: 'ai_topup_60', credits: 60, priceUsd: 3, googlePlayProductId: 'bascardo_ai_credits_60' },           // $0.050 a credit · 2 drafts
+  ai_topup_150: { id: 'ai_topup_150', credits: 150, priceUsd: 5, googlePlayProductId: 'bascardo_ai_credits_150' },       // $0.033 · 1 clip
+  ai_topup_625: { id: 'ai_topup_625', credits: 625, priceUsd: 12, googlePlayProductId: 'bascardo_ai_credits_625' },      // $0.0192 · 5 clips
+  ai_topup_1500: { id: 'ai_topup_1500', credits: 1500, priceUsd: 27, googlePlayProductId: 'bascardo_ai_credits_1500' },  // $0.018 · 12 clips
+  ai_topup_3750: { id: 'ai_topup_3750', credits: 3750, priceUsd: 60, googlePlayProductId: 'bascardo_ai_credits_3750' },  // $0.016 · 30 clips
 };
 export const TOPUP_PACK_BY_PLAY_ID = Object.fromEntries(Object.values(TOPUP_PACKS).filter((p) => p.googlePlayProductId).map((p) => [p.googlePlayProductId, p]));
 export const CORRECTION_COST_USD = 0.0011;
