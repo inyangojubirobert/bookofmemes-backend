@@ -182,9 +182,9 @@ export const ACTION_COST_USD = {
 // better deal, and far above our worst cost per credit even after Google's cut
 // of the wallet purchase. scripts/aiPlanEconomics.js checks both.
 export const TOPUP_PACKS = {
-  ai_topup_60: { id: 'ai_topup_60', credits: 60, priceUsd: 3, googlePlayProductId: 'bom_ai_credits_60' },     // $0.050 a credit
-  ai_topup_150: { id: 'ai_topup_150', credits: 150, priceUsd: 7, googlePlayProductId: 'bom_ai_credits_150' },  // $0.047
-  ai_topup_400: { id: 'ai_topup_400', credits: 400, priceUsd: 19, googlePlayProductId: 'bom_ai_credits_400' }, // $0.0475
+  ai_topup_60: { id: 'ai_topup_60', credits: 60, priceUsd: 3, googlePlayProductId: 'bascardo_ai_credits_60' },     // $0.050 a credit
+  ai_topup_150: { id: 'ai_topup_150', credits: 150, priceUsd: 7, googlePlayProductId: 'bascardo_ai_credits_150' },  // $0.047
+  ai_topup_400: { id: 'ai_topup_400', credits: 400, priceUsd: 19, googlePlayProductId: 'bascardo_ai_credits_400' }, // $0.0475
 };
 export const TOPUP_PACK_BY_PLAY_ID = Object.fromEntries(Object.values(TOPUP_PACKS).filter((p) => p.googlePlayProductId).map((p) => [p.googlePlayProductId, p]));
 export const CORRECTION_COST_USD = 0.0011;

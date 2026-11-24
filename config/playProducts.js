@@ -47,7 +47,7 @@ export const PLAY_PACKAGE_NAME =
 // AI credit packs (migration 089): one consumable Google Play product each, the same price as
 // config/aiPlans.js TOPUP_PACKS. Create them in Play Console → Monetize → In-app products.
 export const PLAY_AI_TOPUP_PRODUCTS = [
-  { productId: 'bom_ai_credits_60',  price: 3,  title: '60 AI credits',  description: '60 Bascardo AI credits. They never expire and are used after your monthly credits.' },
-  { productId: 'bom_ai_credits_150', price: 7,  title: '150 AI credits', description: '150 Bascardo AI credits (1 AI video clip). They never expire and are used after your monthly credits.' },
-  { productId: 'bom_ai_credits_400', price: 19, title: '400 AI credits', description: '400 Bascardo AI credits (3 AI video clips). They never expire and are used after your monthly credits.' },
+  { productId: 'bascardo_ai_credits_60',  price: 3,  title: '60 Bascardo AI credits',  description: '60 Bascardo AI credits. They never expire and are used after your monthly credits.' },
+  { productId: 'bascardo_ai_credits_150', price: 7,  title: '150 Bascardo AI credits', description: '150 Bascardo AI credits (1 AI video clip). They never expire and are used after your monthly credits.' },
+  { productId: 'bascardo_ai_credits_400', price: 19, title: '400 Bascardo AI credits', description: '400 Bascardo AI credits (3 AI video clips). They never expire and are used after your monthly credits.' },
 ];
