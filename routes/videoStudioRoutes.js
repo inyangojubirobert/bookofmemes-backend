@@ -62,7 +62,7 @@ async function requireVideoPlan(req, res, next) {
   try {
     const status = await creditStatus(req.user.id);
     if (!status.plan.premiumModels) {
-      return fail(res, 403, 'Video Studio is part of the Bascardo AI Pro and Business plans.', { code: 'video_needs_plan' });
+      return fail(res, 403, 'Video Studio is part of every paid Bascardo AI plan.', { code: 'video_needs_plan' });
     }
     req.creditStatus = status;
     next();

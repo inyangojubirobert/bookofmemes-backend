@@ -392,7 +392,7 @@ const status = await creditStatus(userId);
     if (!premium) {
       return res.status(403).json({
         success: false, code: 'video_needs_plan',
-        error: 'AI video is part of the Bascardo AI Pro and Business plans. Upgrade to make videos with the full video engine.',
+        error: 'AI video is part of every paid Bascardo AI plan. Upgrade to make videos with the full video engine.',
       });
     }
     const cost = creditsFor('video', { premium, reference: !!referenceImageUrl });

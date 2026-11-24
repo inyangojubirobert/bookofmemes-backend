@@ -6,7 +6,7 @@ import { ITEM_TYPES, CONTENT_TYPES, ALL_TYPES } from '../config/itemTypes.js';
 import { authenticateToken } from '../auth.js';
 import { CREDIT_PRICES, formatCredits, creditsToLogUnits, hasCredits, chargeCredits } from '../utils/credits.js';
 import { creditStatus, spendCredits, creditsView, outOfCreditsMessage } from '../utils/aiCredits.js';
-import { creditsFor, AI_PLANS } from '../config/aiPlans.js';
+import { creditsFor, AI_PLANS, TOP_PLAN_ID } from '../config/aiPlans.js';
 import { getAiPlan } from '../utils/isPremium.js';
 import { makeDailyCounter } from '../utils/dailyQuota.js';
 import { logGeneration } from '../utils/aiGenerationLog.js';
@@ -75,7 +75,7 @@ async function dailyResearchQuota(req, res, next) {
     const cost = creditsFor(action, { premium: status.plan.premiumModels });
     if (status.remaining < cost) {
       return res.status(429).json({
-        error: outOfCreditsMessage(status, cost, status.plan.id === 'business' ? ' They renew on the 1st.' : ' Upgrade your Bascardo AI plan for more.'),
+        error: outOfCreditsMessage(status, cost, status.plan.id === TOP_PLAN_ID ? ' They renew on the 1st.' : ' Upgrade your Bascardo AI plan for more.'),
       });
     }
     res.on('finish', () => {
@@ -102,7 +102,7 @@ router.post('/correct', authenticateToken, rateLimit, async (req, res) => {
   const userId = req.user.id;
   const plan = await getAiPlan(userId);
   const perDay = plan.correctionsPerDay || 0;
-  if (!perDay) return res.status(403).json({ error: 'Automatic correction is part of Bascardo AI Pro and Business.', code: 'upgrade_required' });
+  if (!perDay) return res.status(403).json({ error: 'Automatic correction is part of paid Bascardo AI plans.', code: 'upgrade_required' });
   if (correctionsToday.usedToday(userId) >= perDay) return res.status(429).json({ error: 'Daily correction limit reached.', code: 'daily_limit' });
   if (!text || text.trim().length < 5) {
     return res.status(400).json({ error: 'Text too short' });

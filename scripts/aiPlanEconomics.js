@@ -5,7 +5,7 @@
 // Defaults: 3% of users pay, free users use 50% of their credits, payers 70%.
 // Costs are the worst-case USD per action in config/aiPlans.js
 // (ACTION_COST_USD); Google keeps 15% of subscriptions.
-import { AI_PLANS, ACTION_COSTS, ACTION_COST_USD, CREDIT_COST_CEILING_USD, CORRECTION_COST_USD, TOPUP_PACKS, REF_PRICING, refCredits } from '../config/aiPlans.js';
+import { AI_PLANS, PAID_PLAN_IDS, ACTION_COSTS, ACTION_COST_USD, CREDIT_COST_CEILING_USD, CORRECTION_COST_USD, TOPUP_PACKS, REF_PRICING, refCredits } from '../config/aiPlans.js';
 
 const [conv = 3, freeUse = 50, paidUse = 70] = process.argv.slice(2).map(Number);
 const GOOGLE_FEE = 0.15;
@@ -34,7 +34,7 @@ const freePerPayer = (100 - conv) / conv;
 console.log(`\nFree: ${free.monthlyCredits} credits, worst $${freeWorst.toFixed(2)}/user/month, typical $${freeTypical.toFixed(3)}`);
 console.log(`At ${conv}% paying there are ${freePerPayer.toFixed(0)} free users per subscriber.\n`);
 
-for (const p of [AI_PLANS.pro, AI_PLANS.business]) {
+for (const p of PAID_PLAN_IDS.map((id) => AI_PLANS[id])) {
   const net = p.priceUsd * (1 - GOOGLE_FEE);
   const worst = p.monthlyCredits * worstPerCredit(true) + corrections(p);
   if (p.correctionsPerDay) console.log(`${p.name} includes ${p.correctionsPerDay} chat corrections a day: up to $${corrections(p).toFixed(2)} a month`);
@@ -50,7 +50,7 @@ for (const p of [AI_PLANS.pro, AI_PLANS.business]) {
 // and still beat the worst cost per credit after Google's cut (up to 30% on
 // wallet purchases).
 const PLAY_FEE_MAX = 0.30;
-const bestPlanPerCredit = Math.min(...[AI_PLANS.pro, AI_PLANS.business].map((p) => p.priceUsd / p.monthlyCredits));
+const bestPlanPerCredit = Math.min(...PAID_PLAN_IDS.map((id) => AI_PLANS[id]).map((p) => p.priceUsd / p.monthlyCredits));
 const worstAny = Math.max(worstPerCredit(true), worstPerCredit(false));
 console.log(`\nTop-ups (best subscription price per credit $${bestPlanPerCredit.toFixed(4)}, worst cost per credit $${worstAny.toFixed(4)}):`);
 for (const p of Object.values(TOPUP_PACKS)) {
@@ -83,7 +83,7 @@ const taste = {
 };
 console.log(`\nFree plan (${AI_PLANS.free.monthlyCredits} credits): one finished piece per studio`);
 for (const [k, v] of Object.entries(taste)) console.log(`  ${v <= AI_PLANS.free.monthlyCredits ? '✔' : '·'} ${k}: ${v} credits${v > AI_PLANS.free.monthlyCredits ? ' (needs a top-up or a plan)' : ''}`);
-console.log('  · video: Pro and Business only (by decision)');
+console.log('  · video: paid plans only (by decision)');
 
 console.log(ok ? '\n✔ Every plan pays for itself and its free users.' : '\n✘ Something loses money: fix ACTION_COSTS or monthlyCredits.');
 process.exit(ok ? 0 : 1);

@@ -5,6 +5,8 @@
 //   Free      10 credits a month     $0
 //   Pro      500 credits a month     $9   (Google keeps 15%: we receive $7.65)  4 video clips
 //   Business 1500 credits a month    $20  (we receive $17.00)  12 video clips
+//   Creator Artist $40 3,500 · Director $75 7,000 · Beast $100 9,500 · Genius $200 19,500
+//   · Titan $300 29,500 · Max $400 39,500 (Google Play's ceiling), for creators making video at volume.
 //   (2026-11-24: raised from 200 / 750 so the plans buy a useful number of clips; clip price kept at 125.
 //   Checked with scripts/aiPlanEconomics.js: both still carry 32 free users each in the worst case.)
 //
@@ -27,6 +29,14 @@
 // video and narration can still be bought one at a time with wallet credits
 // (HD, utils/credits.js).
 export const CREDIT_COST_CEILING_USD = 0.0065;
+
+// A Creator plan: one Google Play subscription each (bascardo_ai_<id>_monthly, base plan 'monthly').
+function creatorPlan(id, name, priceUsd, monthlyCredits, correctionsPerDay) {
+  return {
+    id, name, priceUsd, monthlyCredits, correctionsPerDay, creator: true, premiumModels: true,
+    googlePlayProductId: process.env[`GOOGLE_PLAY_AI_${id.toUpperCase()}_PRODUCT_ID`] || `bascardo_ai_${id}_monthly`,
+  };
+}
 
 export const AI_PLANS = {
   free: {
@@ -56,6 +66,17 @@ export const AI_PLANS = {
     googlePlayProductId: process.env.GOOGLE_PLAY_AI_BUSINESS_PRODUCT_ID || 'bom_ai_business_monthly',
     premiumModels: true,
   },
+  // ── Creator plans (2026-11-24): for creators who make video at volume. Same ladder idea as
+  // One Dream's ad packages, up to Google Play's $400 ceiling. Credits rise a little per dollar
+  // up the ladder (87.5 → 98.8 a dollar) while every plan keeps ~21-23% of what we receive in
+  // the WORST case (every credit on the most expensive thing) after carrying its free users.
+  // Credits are whole video clips (125 each). Checked by scripts/aiPlanEconomics.js.
+  artist: creatorPlan('artist', 'Creator Artist', 40, 3500, 60),       // 28 clips
+  director: creatorPlan('director', 'Creator Director', 75, 7000, 80), // 56 clips
+  beast: creatorPlan('beast', 'Creator Beast', 100, 9500, 100),        // 76 clips
+  genius: creatorPlan('genius', 'Creator Genius', 200, 19500, 100),    // 156 clips
+  titan: creatorPlan('titan', 'Creator Titan', 300, 29500, 100),       // 236 clips
+  max: creatorPlan('max', 'Creator Max', 400, 39500, 100),             // 316 clips
 };
 
 // Credits per action. "fast" = the Free plan's models, "premium" = Pro and
@@ -220,7 +241,9 @@ export function creditsFor(action, { premium = false, reference = false, seconds
 // Every Play subscription has exactly one auto-renewing monthly base plan with this id.
 export const AI_BASE_PLAN_ID = 'monthly';
 
-export const AI_PLAN_ORDER = ['free', 'pro', 'business'];
+export const AI_PLAN_ORDER = ['free', 'pro', 'business', 'artist', 'director', 'beast', 'genius', 'titan', 'max'];
+export const PAID_PLAN_IDS = AI_PLAN_ORDER.filter((id) => id !== 'free');
+export const TOP_PLAN_ID = AI_PLAN_ORDER[AI_PLAN_ORDER.length - 1];
 
 export function planFromGoogleProductId(productId) {
   return Object.values(AI_PLANS).find((p) => p.googlePlayProductId && p.googlePlayProductId === productId)?.id || null;
@@ -240,6 +263,6 @@ export function planExamples(p) {
 export const publicPlan = (p) => ({
   id: p.id, name: p.name, price_usd: p.priceUsd, monthly_credits: p.monthlyCredits,
   google_play_product_id: p.googlePlayProductId, base_plan_id: p.googlePlayProductId ? AI_BASE_PLAN_ID : null,
-  premium_models: p.premiumModels, corrections_per_day: p.correctionsPerDay, examples: planExamples(p),
+  premium_models: p.premiumModels, corrections_per_day: p.correctionsPerDay, examples: planExamples(p), creator: !!p.creator,
   action_costs: Object.fromEntries(Object.entries(ACTION_COSTS).map(([k, v]) => [k, p.premiumModels ? v.premium : v.fast])),
 });

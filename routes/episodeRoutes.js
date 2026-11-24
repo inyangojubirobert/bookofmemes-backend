@@ -47,7 +47,7 @@ try { LIBRARY = JSON.parse(fs.readFileSync(new URL('../config/soundLibrary.json'
 async function requirePlan(req, res, next) {
   try {
     const status = await creditStatus(req.user.id);
-    if (!status.plan.premiumModels) return fail(res, 403, 'The Auto Episode Engine is part of the Bascardo AI Pro and Business plans.', { code: 'video_needs_plan' });
+    if (!status.plan.premiumModels) return fail(res, 403, 'The Auto Episode Engine is part of every paid Bascardo AI plan.', { code: 'video_needs_plan' });
     req.creditStatus = status;
     next();
   } catch { fail(res, 500, 'Could not check your plan'); }
