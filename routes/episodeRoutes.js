@@ -26,7 +26,7 @@ import { AI_MODELS } from '../config/aiModels.js';
 import { assembleShot } from '../config/videoCast.js';
 import { lightText, VOICES, MUSIC_THEMES, LOOKS, ASPECTS, validVoiceId } from '../config/soundStudio.js';
 import { customVoiceMap, publicCustomVoice } from '../utils/customVoices.js';
-import { GENRE_PACKS, FORMATS, VISUAL_MODES, DRAMA_MODES, ART_STYLES, LIMITS, estimateCredits, EPISODE_MODEL, AUTOMATION_PREMIUM } from '../config/episodeEngine.js';
+import { GENRE_PACKS, FORMATS, VISUAL_MODES, DRAMA_MODES, ART_STYLES, LIMITS, estimateCredits, EPISODE_MODEL, AUTOMATION_PREMIUM, withPremium } from '../config/episodeEngine.js';
 const capOf = (v) => { const n = Math.round(Number(v)); return Number.isFinite(n) && n > 0 ? Math.min(n, 1000000) : null; };
 import { STAGES, advanceEpisode, kickEpisodes } from '../utils/episodePipeline.js';
 import fs from 'fs';
@@ -274,7 +274,8 @@ router.post('/:id/shots/:sid/redraw', authenticateToken, requirePlan, async (req
   const { data: assetRows } = await supabase.from('video_assets').select('*').eq('user_id', req.user.id).limit(500);
   const assets = Object.fromEntries((assetRows || []).map((x) => [x.id, x]));
   const a = assembleShot(p, { ...shot, visual }, assets, { maxChars: 2800 });
-  const cost = creditsFor('keyframe', { premium: true, refs: a.references.length }); // priced by references sent
+  const baseCost = creditsFor('keyframe', { premium: true, refs: a.references.length }); // priced by references sent
+  const cost = withPremium(baseCost); // + the automation premium, like every episode step
   const reservation = await reserveCredits(req.user.id, status.plan, cost, `epredraw:${crypto.randomUUID()}`);
   if (!reservation) return fail(res, 402, outOfCreditsMessage(status, cost), { code: 'out_of_credits' });
   try {
@@ -285,9 +286,9 @@ router.post('/:id/shots/:sid/redraw', authenticateToken, requirePlan, async (req
     const kept = await cloudinary.uploader.upload(data[0].imageURL, { folder: 'bookofmemes/video-studio/keyframes', resource_type: 'image' });
     await supabase.from('video_shots').update({ visual, still_url: kept.secure_url, start_image_url: shot.motion === 'clip' ? kept.secure_url : null, qc: { ok: true, notes: 'redrawn by you', tries: (shot.qc?.tries || 0) + 1 }, compiled: { ...(shot.compiled || {}), prompt, references: a.references, labels: a.labels }, updated_at: now() }).eq('id', shot.id);
     await commitCredits(req.user.id, reservation);
-    // A redraw the user asked for: base price, no automation premium.
+    // A redraw the user asked for: billed like every attempt (base + automation premium).
     const billing = { first: 0, premium: 0, redraws: 0, failed: 0, steps: 0, ...(p.pipeline?.billing || {}) };
-    billing.redraws += cost; billing.steps += 1;
+    billing.redraws += cost; billing.premium += cost - baseCost; billing.steps += 1;
     const pl = { ...(p.pipeline || {}), billing, credits_used: (p.pipeline?.credits_used || 0) + cost };
     await supabase.from('video_projects').update({ pipeline: pl, updated_at: now() }).eq('id', p.id);
     const { data: shots } = await supabase.from('video_shots').select('*').eq('project_id', p.id).order('number');

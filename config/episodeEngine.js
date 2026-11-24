@@ -66,10 +66,10 @@ export const ART_STYLES = {
   comic: { label: 'Comic book', prompt: 'Style: comic book panel, bold ink outlines, flat vivid colours, halftone shading.' },
   storybook: { label: 'Storybook painting', prompt: 'Style: painted storybook illustration, warm gouache textures, gentle light.' },
 };
-// Pricing of Model 2 (owner's decision, 2026-11-23): pay as you go, step by step as the engine
-// runs. The FIRST attempt of every step costs its base price + this automation premium (the
-// engine saves the user's time and failed attempts). Redraws and failed attempts that still
-// cost us (the provider produced something) are billed at base price, without the premium.
+// Pricing of Model 2 (owner's decision, 2026-11-24): pay as you go, step by step as the engine
+// runs. EVERY billed attempt (first attempts, redraws, and failed attempts the provider still
+// charged us for) costs its base price + this automation premium. A step that fails before
+// reaching the provider, or that the provider refuses without charging, costs the user nothing.
 // One adjustable setting; EPISODE_PREMIUM_PCT on the server overrides it.
 export const AUTOMATION_PREMIUM = Math.max(0, Math.min(200, Number(process.env.EPISODE_PREMIUM_PCT ?? 30))) / 100;
 export const withPremium = (base) => Math.ceil(base * (1 + AUTOMATION_PREMIUM));
@@ -285,11 +285,12 @@ export function estimateCredits({ seconds, visual_mode, newCast = 3 }, creditsFo
     voices: Math.round(range.target * 1.2) * creditsFor('voiceLine', { premium: true }),
     finish: creditsFor('episodeRender', { premium: true }) + creditsFor('episodeLedger', { premium: true }),
   };
-  // First attempts carry the automation premium; redraws are base price. The range runs from
-  // "nothing redrawn" to "about 1 in 3 stills redrawn once" (the check allows one redraw each).
+  // Every billed attempt carries the automation premium, redraws included. The range runs from
+  // "nothing redrawn" (low) to "about 1 in 3 stills redrawn once" (high: the check allows one
+  // redraw per still), so an episode that needs fixes doesn't surprise anyone.
   const base = Object.values(parts).reduce((a, b) => a + b, 0);
   const first = withPremium(base);
-  const kf = creditsFor('keyframe', { premium: true });
+  const kf = withPremium(creditsFor('keyframe', { premium: true }));
   const typicalRedraws = Math.ceil(stills * 0.2) * kf;
   const highRedraws = Math.ceil(stills * 0.35) * kf;
   return {

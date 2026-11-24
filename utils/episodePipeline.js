@@ -104,11 +104,10 @@ function checkCap(p, cost) {
 }
 
 /**
- * Pay as you go: reserve → work → commit, one step at a time.
- *   attempt 1   base price + the automation premium (AUTOMATION_PREMIUM, 30%)
- *   attempt 2+  a redraw: base price
- * If the step fails after the provider already produced (and charged for) something,
- * work() sets spend.spent and the attempt is billed at base price; otherwise nothing is charged.
+ * Pay as you go: reserve → work → commit, one step at a time. Every billed attempt costs
+ * base price + the automation premium (AUTOMATION_PREMIUM, 30%): attempt 1, redraws (attempt 2+),
+ * and failed attempts the provider still charged us for (work() sets spend.spent once the provider
+ * produced something). A step that fails before the provider, or is refused for free, costs nothing.
  * Out of credits or over the cap → the episode pauses with its progress saved.
  */
 async function charged(p, action, { units = 1, key, opts = {}, attempt = 1 }, work) {
@@ -116,7 +115,7 @@ async function charged(p, action, { units = 1, key, opts = {}, attempt = 1 }, wo
   if (!status.plan.premiumModels) throw new Pause('needs_plan', 'Auto episodes are part of the Bascardo AI Pro and Business plans.');
   const base = creditsFor(action, { premium: true, ...opts }) * Math.max(1, units);
   const first = attempt <= 1;
-  const cost = first ? withPremium(base) : base;
+  const cost = withPremium(base);
   checkCap(p, cost);
   const short = `This step needs ${cost} AI credits; you have ${status.remaining}. Top up, then tap Continue: the episode carries on from here.`;
   if (status.remaining < cost) throw new Pause('needs_credits', short);
@@ -130,8 +129,8 @@ async function charged(p, action, { units = 1, key, opts = {}, attempt = 1 }, wo
     return out;
   } catch (err) {
     if (spend.spent && !(err instanceof Pause)) {
-      await commitCredits(p.user_id, reservation, base); // a failed attempt the provider charged for: base price
-      bill(p, 'failed', base);
+      await commitCredits(p.user_id, reservation); // a failed attempt the provider charged for: billed like any attempt
+      bill(p, 'failed', cost, cost - base);
     } else await releaseCredits(reservation);
     throw err;
   }
@@ -335,14 +334,18 @@ const STAGE_RUN = {
           const refs = a.references.filter((u) => !charPics.has(u));
           try { pic = await draw({ spend, prompt, references: refs, size: [width, height], folder: 'bookofmemes/video-studio/keyframes' }); }
           catch (err3) { if (isRefusal(err3)) throw new Refused(shot); throw err3; }
-          a = { ...a, references: refs };
+          a = { ...a, references: refs, noCharacterPictures: true };
           const who = (shot.cast_slots?.characters || []).map((c) => assets[c.id]?.name).filter(Boolean).join(', ');
           log(p, `Shot ${shot.number}: the image model's safety filter refuses the reference pictures of ${who || 'a character'}, so it was drawn from their written looks (the face may vary). Replacing those pictures in the Cast library fixes it.`);
         }
       }
       // Continuity check against each character's reference picture and the never-show list.
       const chars = (shot.cast_slots?.characters || []).map((c) => ({ name: assets[c.id]?.name, ref: assets[c.id]?.refs?.find((r) => r.slot === 'front')?.url })).filter((c) => c.name);
-      const qc = await checkKeyframe({ keyframeUrl: pic.url, characters: chars, avoid: a.avoid }).catch(() => ({ ok: true, notes: 'check skipped' }));
+      // Drawn without the characters' pictures (safety-filter fallback): comparing faces with those
+      // pictures would always "fail" and pay for a pointless redraw. Only the never-show list is checked.
+      const qc = a.noCharacterPictures
+        ? await checkKeyframe({ keyframeUrl: pic.url, characters: [], avoid: a.avoid }).then((r) => ({ ...r, notes: r.ok ? 'drawn from written looks (no character pictures): the face may vary' : r.notes })).catch(() => ({ ok: true, notes: 'check skipped' }))
+        : await checkKeyframe({ keyframeUrl: pic.url, characters: chars, avoid: a.avoid }).catch(() => ({ ok: true, notes: 'check skipped' }));
       const tries = (shot.qc?.tries || 0) + 1;
       const versions = Object.fromEntries(Object.values(assets).filter((x) => a.labels.some((l) => l.startsWith(x.name))).map((x) => [x.id, x.updated_at]));
       await supabase.from('video_shots').update({
