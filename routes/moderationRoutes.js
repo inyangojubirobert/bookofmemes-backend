@@ -15,7 +15,7 @@ import { notifyAdmins } from './supportRoutes.js';
 
 const router = express.Router();
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const REASONS = { spam: 'Spam or scam', nudity: 'Nudity or sexual content', hate: 'Hate or harassment', violence: 'Violence or dangerous acts', copyright: 'Copyright (my work)', other: 'Something else' };
+const REASONS = { child_safety: 'Child sexual abuse or exploitation', spam: 'Spam or scam', nudity: 'Nudity or sexual content', hate: 'Hate or harassment', violence: 'Violence or dangerous acts', copyright: 'Copyright (my work)', other: 'Something else' };
 // Item types → their table, and the fields that describe a post in a report.
 const ITEM_TABLES = {
   stories: 'stories', memes: 'memes', puzzles: 'puzzles', kids_collections: 'kids_collections',
@@ -86,7 +86,7 @@ router.post('/report', authenticateToken, async (req, res) => {
     console.error('[moderation] report failed:', error.message);
     return fail(res, /content_reports|PGRST205/.test(error.message) ? 503 : 500, 'Could not send the report. Please try again.');
   }
-  notifyAdmins(`🚩 New report: ${REASONS[reason]}\n${label}${details ? `\n"${details.slice(0, 200)}"` : ''}\nOpen Profile → Reports in the app.`);
+  notifyAdmins(`${reason === 'child_safety' ? '🚨 URGENT child safety report (act within 24 hours; see bookofmemes.cc/child-safety)' : '🚩 New report'}: ${REASONS[reason]}\n${label}${details ? `\n"${details.slice(0, 200)}"` : ''}\nOpen Profile → Reports in the app.`);
   res.json({ success: true, data: { reported: true } });
 });
 
@@ -106,7 +106,8 @@ router.get('/admin/reports', authenticateToken, requireAdmin, async (req, res) =
   for (const r of data || []) if (r.status === 'open') counts[key(r)] = (counts[key(r)] || 0) + 1;
   res.json({ success: true, data: {
     reasons: REASONS,
-    reports: (data || []).map((r) => ({ ...r, reason_label: REASONS[r.reason], reporter: byId[r.reporter_id] || null, target_user: byId[r.target_user_id] || null, open_count: counts[key(r)] || 0 })),
+    // Child safety reports first: they are acted on within 24 hours.
+    reports: (data || []).sort((x, y) => (y.reason === 'child_safety') - (x.reason === 'child_safety')).map((r) => ({ ...r, reason_label: REASONS[r.reason], reporter: byId[r.reporter_id] || null, target_user: byId[r.target_user_id] || null, open_count: counts[key(r)] || 0 })),
   } });
 });
 
