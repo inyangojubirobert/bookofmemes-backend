@@ -38,6 +38,7 @@ import { startEpisodeRunner } from "./utils/episodePipeline.js";
 import brandRoutes from "./routes/brandRoutes.js";
 import { startJobRunner } from "./utils/studioJobs.js";
 import supportRoutes, { startSupportAlertTimer } from "./routes/supportRoutes.js";
+import moderationRoutes from "./routes/moderationRoutes.js";
 
 
 dotenv.config();
@@ -88,6 +89,7 @@ startJobRunner();
 startEpisodeRunner(); // advances Auto Episode Engine episodes in the background
 startPushJobs(); // pop-up notifications over other apps + recommendations (087)
 app.use("/api/support", supportRoutes); // admin inbox + WhatsApp alerts (migration 069)
+app.use("/api/moderation", moderationRoutes); // reports, block-related admin actions (migration 091)
 
 // AI features
 app.use("/api/ai", aiRoutes);

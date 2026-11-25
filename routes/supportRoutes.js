@@ -455,3 +455,13 @@ export function startSupportAlertTimer() {
 }
 
 export default router;
+
+/** One alert to the admins on the configured channel (Telegram or WhatsApp). Never throws. */
+export async function notifyAdmins(text) {
+  try {
+    const c = await getConfig();
+    if (!c?.enabled || !alertReady(c)) return false;
+    await sendAlert(c, text);
+    return true;
+  } catch (err) { console.warn('[support] admin alert failed:', err.message); return false; }
+}
