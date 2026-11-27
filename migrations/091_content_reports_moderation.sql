@@ -11,7 +11,7 @@ BEGIN
   IF to_regclass('public.profiles') IS NULL OR to_regclass('public.blocked_users') IS NULL THEN
     RAISE EXCEPTION 'Wrong Supabase project: run this in the Book of Memes project (URL starts with zgyphn). Nothing was changed.';
   END IF;
-END $$;
+END $$; 
 
 CREATE TABLE IF NOT EXISTS public.content_reports (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
