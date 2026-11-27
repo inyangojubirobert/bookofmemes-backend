@@ -13,6 +13,7 @@
 // would not run the same step twice.
 import { supabase } from '../config/db.js';
 import { commitCredits, releaseCredits } from './aiCredits.js';
+import { jobScope } from './providerBalance.js';
 
 const HANDLERS = new Map();
 const TICK_MS = 4000;
@@ -119,7 +120,7 @@ async function step(job) {
   try {
     if (Date.now() - new Date(job.created_at).getTime() > GIVE_UP_MS) throw Object.assign(new Error('The provider took too long.'), { permanent: true });
     if (job.status === 'queued') {
-      const started = await handler.start(job, ctx);
+      const started = await jobScope.run(true, () => handler.start(job, ctx));
       await supabase.from('studio_jobs').update({
         status: 'running', provider: started?.provider || null, provider_task_id: started?.providerTaskId || null,
         progress: 10, next_run_at: later(handler.pollEveryMs || 5000), locked_until: null, updated_at: now(),

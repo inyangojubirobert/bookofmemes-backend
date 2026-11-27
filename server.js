@@ -38,6 +38,7 @@ import { startEpisodeRunner } from "./utils/episodePipeline.js";
 import brandRoutes from "./routes/brandRoutes.js";
 import { startJobRunner } from "./utils/studioJobs.js";
 import supportRoutes, { startSupportAlertTimer } from "./routes/supportRoutes.js";
+import { startProviderBalanceTimer } from "./utils/providerBalance.js";
 import moderationRoutes from "./routes/moderationRoutes.js";
 
 
@@ -1050,4 +1051,5 @@ app.listen(PORT, () => {
   startLeadershipGamesSweepTimer();
   startVoidedPurchaseSweepTimer();
   startSupportAlertTimer();
+  startProviderBalanceTimer();
 });

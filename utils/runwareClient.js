@@ -1,4 +1,6 @@
 // One call to Runware's task API, shared by every route that uses it.
+import { isBalanceError, balanceRefused } from './providerBalance.js';
+
 const RUNWARE_API_URL = 'https://api.runware.ai/v1';
 
 // Child safety (CSAE standards, bookofmemes.cc/child-safety): a picture or video request that
@@ -26,6 +28,14 @@ export async function callRunwareTasks(tasks) {
     // A request Runware rejects as invalid fails the same way every time; a
     // background job shouldn't retry it (rate limits / 5xx are retried).
     if (response.status >= 400 && response.status < 500 && response.status !== 429) err.permanent = true;
+    // Our Runware account is too low to run this. The customer sees only the usual "could not
+    // be made, you were not charged"; the admins are alerted and the refusal counted
+    // (utils/providerBalance.js).
+    if (isBalanceError(err.message)) {
+      err.permanent = true;
+      err.providerBalance = true;
+      balanceRefused();
+    }
     throw err;
   }
   return { data: json?.data || [], status: response.status };
